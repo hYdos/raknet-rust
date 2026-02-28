@@ -196,9 +196,33 @@ impl TelemetryRegistry {
             total.rate_ip_block_hits = total
                 .rate_ip_block_hits
                 .saturating_add(s.rate_ip_block_hits);
+            total.rate_ip_block_hits_rate_exceeded = total
+                .rate_ip_block_hits_rate_exceeded
+                .saturating_add(s.rate_ip_block_hits_rate_exceeded);
+            total.rate_ip_block_hits_manual = total
+                .rate_ip_block_hits_manual
+                .saturating_add(s.rate_ip_block_hits_manual);
+            total.rate_ip_block_hits_handshake_heuristic = total
+                .rate_ip_block_hits_handshake_heuristic
+                .saturating_add(s.rate_ip_block_hits_handshake_heuristic);
+            total.rate_ip_block_hits_cookie_mismatch_guard = total
+                .rate_ip_block_hits_cookie_mismatch_guard
+                .saturating_add(s.rate_ip_block_hits_cookie_mismatch_guard);
             total.rate_addresses_blocked = total
                 .rate_addresses_blocked
                 .saturating_add(s.rate_addresses_blocked);
+            total.rate_addresses_blocked_rate_exceeded = total
+                .rate_addresses_blocked_rate_exceeded
+                .saturating_add(s.rate_addresses_blocked_rate_exceeded);
+            total.rate_addresses_blocked_manual = total
+                .rate_addresses_blocked_manual
+                .saturating_add(s.rate_addresses_blocked_manual);
+            total.rate_addresses_blocked_handshake_heuristic = total
+                .rate_addresses_blocked_handshake_heuristic
+                .saturating_add(s.rate_addresses_blocked_handshake_heuristic);
+            total.rate_addresses_blocked_cookie_mismatch_guard = total
+                .rate_addresses_blocked_cookie_mismatch_guard
+                .saturating_add(s.rate_addresses_blocked_cookie_mismatch_guard);
             total.rate_addresses_unblocked = total
                 .rate_addresses_unblocked
                 .saturating_add(s.rate_addresses_unblocked);
@@ -497,9 +521,49 @@ impl TelemetryRegistry {
             rate_ip_block_hits
         );
         push_snapshot_counter!(
+            "rate_ip_block_hits_rate_exceeded_total",
+            "Per-IP block hits caused by packet rate exceeding threshold",
+            rate_ip_block_hits_rate_exceeded
+        );
+        push_snapshot_counter!(
+            "rate_ip_block_hits_manual_total",
+            "Per-IP block hits caused by manual address blocks",
+            rate_ip_block_hits_manual
+        );
+        push_snapshot_counter!(
+            "rate_ip_block_hits_handshake_heuristic_total",
+            "Per-IP block hits caused by handshake heuristic guard",
+            rate_ip_block_hits_handshake_heuristic
+        );
+        push_snapshot_counter!(
+            "rate_ip_block_hits_cookie_mismatch_guard_total",
+            "Per-IP block hits caused by cookie mismatch guard",
+            rate_ip_block_hits_cookie_mismatch_guard
+        );
+        push_snapshot_counter!(
             "rate_addresses_blocked_total",
             "Addresses blocked by rate limiter",
             rate_addresses_blocked
+        );
+        push_snapshot_counter!(
+            "rate_addresses_blocked_rate_exceeded_total",
+            "Addresses blocked due to packet rate exceeding threshold",
+            rate_addresses_blocked_rate_exceeded
+        );
+        push_snapshot_counter!(
+            "rate_addresses_blocked_manual_total",
+            "Addresses blocked manually",
+            rate_addresses_blocked_manual
+        );
+        push_snapshot_counter!(
+            "rate_addresses_blocked_handshake_heuristic_total",
+            "Addresses blocked by handshake heuristic guard",
+            rate_addresses_blocked_handshake_heuristic
+        );
+        push_snapshot_counter!(
+            "rate_addresses_blocked_cookie_mismatch_guard_total",
+            "Addresses blocked by cookie mismatch guard",
+            rate_addresses_blocked_cookie_mismatch_guard
         );
         push_snapshot_counter!(
             "rate_addresses_unblocked_total",
@@ -856,9 +920,49 @@ impl TelemetryRegistry {
             rate_ip_block_hits
         );
         write_snapshot_counter!(
+            "rate_ip_block_hits_rate_exceeded_total",
+            "Per-IP block hits caused by packet rate exceeding threshold",
+            rate_ip_block_hits_rate_exceeded
+        );
+        write_snapshot_counter!(
+            "rate_ip_block_hits_manual_total",
+            "Per-IP block hits caused by manual address blocks",
+            rate_ip_block_hits_manual
+        );
+        write_snapshot_counter!(
+            "rate_ip_block_hits_handshake_heuristic_total",
+            "Per-IP block hits caused by handshake heuristic guard",
+            rate_ip_block_hits_handshake_heuristic
+        );
+        write_snapshot_counter!(
+            "rate_ip_block_hits_cookie_mismatch_guard_total",
+            "Per-IP block hits caused by cookie mismatch guard",
+            rate_ip_block_hits_cookie_mismatch_guard
+        );
+        write_snapshot_counter!(
             "rate_addresses_blocked_total",
             "Addresses blocked by rate limiter",
             rate_addresses_blocked
+        );
+        write_snapshot_counter!(
+            "rate_addresses_blocked_rate_exceeded_total",
+            "Addresses blocked due to packet rate exceeding threshold",
+            rate_addresses_blocked_rate_exceeded
+        );
+        write_snapshot_counter!(
+            "rate_addresses_blocked_manual_total",
+            "Addresses blocked manually",
+            rate_addresses_blocked_manual
+        );
+        write_snapshot_counter!(
+            "rate_addresses_blocked_handshake_heuristic_total",
+            "Addresses blocked by handshake heuristic guard",
+            rate_addresses_blocked_handshake_heuristic
+        );
+        write_snapshot_counter!(
+            "rate_addresses_blocked_cookie_mismatch_guard_total",
+            "Addresses blocked by cookie mismatch guard",
+            rate_addresses_blocked_cookie_mismatch_guard
         );
         write_snapshot_counter!(
             "rate_addresses_unblocked_total",

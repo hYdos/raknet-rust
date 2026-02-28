@@ -6,10 +6,21 @@ const MIN_RATE_WINDOW: Duration = Duration::from_millis(1);
 const MIN_BLOCK_DURATION: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    RateExceeded,
+    Manual,
+    HandshakeHeuristic,
+    CookieMismatchGuard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateLimitDecision {
     Allow,
     GlobalLimit,
-    IpBlocked { newly_blocked: bool },
+    IpBlocked {
+        newly_blocked: bool,
+        reason: BlockReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -20,13 +31,22 @@ struct IpWindowState {
 #[derive(Debug, Clone, Copy)]
 struct BlockState {
     blocked_until: Option<Instant>,
+    reason: BlockReason,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct RateLimiterMetrics {
     global_limit_hits: u64,
     ip_block_hits: u64,
+    ip_block_hits_rate_exceeded: u64,
+    ip_block_hits_manual: u64,
+    ip_block_hits_handshake_heuristic: u64,
+    ip_block_hits_cookie_mismatch_guard: u64,
     addresses_blocked: u64,
+    addresses_blocked_rate_exceeded: u64,
+    addresses_blocked_manual: u64,
+    addresses_blocked_handshake_heuristic: u64,
+    addresses_blocked_cookie_mismatch_guard: u64,
     addresses_unblocked: u64,
 }
 
@@ -34,7 +54,15 @@ struct RateLimiterMetrics {
 pub struct RateLimiterMetricsSnapshot {
     pub global_limit_hits: u64,
     pub ip_block_hits: u64,
+    pub ip_block_hits_rate_exceeded: u64,
+    pub ip_block_hits_manual: u64,
+    pub ip_block_hits_handshake_heuristic: u64,
+    pub ip_block_hits_cookie_mismatch_guard: u64,
     pub addresses_blocked: u64,
+    pub addresses_blocked_rate_exceeded: u64,
+    pub addresses_blocked_manual: u64,
+    pub addresses_blocked_handshake_heuristic: u64,
+    pub addresses_blocked_cookie_mismatch_guard: u64,
     pub addresses_unblocked: u64,
     pub blocked_addresses: usize,
     pub exception_addresses: usize,
@@ -92,28 +120,34 @@ impl RateLimiter {
     pub fn check(&mut self, ip: IpAddr, now: Instant) -> RateLimitDecision {
         self.tick(now);
 
-        if self.window_count >= self.global_limit {
-            self.metrics.global_limit_hits = self.metrics.global_limit_hits.saturating_add(1);
-            return RateLimitDecision::GlobalLimit;
-        }
-
         if self.exceptions.contains(&ip) {
             self.window_count += 1;
             return RateLimitDecision::Allow;
         }
 
-        if self.blocked.contains_key(&ip) {
-            self.metrics.ip_block_hits = self.metrics.ip_block_hits.saturating_add(1);
+        if let Some(reason) = self.blocked.get(&ip).map(|state| state.reason) {
+            self.record_ip_block_hit(reason);
             return RateLimitDecision::IpBlocked {
                 newly_blocked: false,
+                reason,
             };
+        }
+
+        if self.window_count >= self.global_limit {
+            self.metrics.global_limit_hits = self.metrics.global_limit_hits.saturating_add(1);
+            return RateLimitDecision::GlobalLimit;
         }
 
         let state = self.ip_state.entry(ip).or_default();
         if state.count >= self.per_ip_limit {
-            let newly_blocked = self.block_address_for(ip, now, self.block_duration);
-            self.metrics.ip_block_hits = self.metrics.ip_block_hits.saturating_add(1);
-            return RateLimitDecision::IpBlocked { newly_blocked };
+            let reason = BlockReason::RateExceeded;
+            let newly_blocked =
+                self.block_address_for_with_reason(ip, now, self.block_duration, reason);
+            self.record_ip_block_hit(reason);
+            return RateLimitDecision::IpBlocked {
+                newly_blocked,
+                reason,
+            };
         }
 
         state.count += 1;
@@ -177,6 +211,10 @@ impl RateLimiter {
     }
 
     pub fn block_address(&mut self, ip: IpAddr) -> bool {
+        self.block_address_with_reason(ip, BlockReason::Manual)
+    }
+
+    pub fn block_address_with_reason(&mut self, ip: IpAddr, reason: BlockReason) -> bool {
         if self.exceptions.contains(&ip) {
             return false;
         }
@@ -186,15 +224,26 @@ impl RateLimiter {
             ip,
             BlockState {
                 blocked_until: None,
+                reason,
             },
         );
         if newly_blocked {
-            self.metrics.addresses_blocked = self.metrics.addresses_blocked.saturating_add(1);
+            self.record_new_block(reason);
         }
         newly_blocked
     }
 
     pub fn block_address_for(&mut self, ip: IpAddr, now: Instant, duration: Duration) -> bool {
+        self.block_address_for_with_reason(ip, now, duration, BlockReason::Manual)
+    }
+
+    pub fn block_address_for_with_reason(
+        &mut self,
+        ip: IpAddr,
+        now: Instant,
+        duration: Duration,
+        reason: BlockReason,
+    ) -> bool {
         if self.exceptions.contains(&ip) {
             return false;
         }
@@ -205,10 +254,11 @@ impl RateLimiter {
             ip,
             BlockState {
                 blocked_until: Some(now + duration),
+                reason,
             },
         );
         if newly_blocked {
-            self.metrics.addresses_blocked = self.metrics.addresses_blocked.saturating_add(1);
+            self.record_new_block(reason);
         }
         newly_blocked
     }
@@ -225,10 +275,76 @@ impl RateLimiter {
         RateLimiterMetricsSnapshot {
             global_limit_hits: self.metrics.global_limit_hits,
             ip_block_hits: self.metrics.ip_block_hits,
+            ip_block_hits_rate_exceeded: self.metrics.ip_block_hits_rate_exceeded,
+            ip_block_hits_manual: self.metrics.ip_block_hits_manual,
+            ip_block_hits_handshake_heuristic: self.metrics.ip_block_hits_handshake_heuristic,
+            ip_block_hits_cookie_mismatch_guard: self.metrics.ip_block_hits_cookie_mismatch_guard,
             addresses_blocked: self.metrics.addresses_blocked,
+            addresses_blocked_rate_exceeded: self.metrics.addresses_blocked_rate_exceeded,
+            addresses_blocked_manual: self.metrics.addresses_blocked_manual,
+            addresses_blocked_handshake_heuristic: self
+                .metrics
+                .addresses_blocked_handshake_heuristic,
+            addresses_blocked_cookie_mismatch_guard: self
+                .metrics
+                .addresses_blocked_cookie_mismatch_guard,
             addresses_unblocked: self.metrics.addresses_unblocked,
             blocked_addresses: self.blocked.len(),
             exception_addresses: self.exceptions.len(),
+        }
+    }
+
+    fn record_ip_block_hit(&mut self, reason: BlockReason) {
+        self.metrics.ip_block_hits = self.metrics.ip_block_hits.saturating_add(1);
+        match reason {
+            BlockReason::RateExceeded => {
+                self.metrics.ip_block_hits_rate_exceeded =
+                    self.metrics.ip_block_hits_rate_exceeded.saturating_add(1);
+            }
+            BlockReason::Manual => {
+                self.metrics.ip_block_hits_manual =
+                    self.metrics.ip_block_hits_manual.saturating_add(1);
+            }
+            BlockReason::HandshakeHeuristic => {
+                self.metrics.ip_block_hits_handshake_heuristic = self
+                    .metrics
+                    .ip_block_hits_handshake_heuristic
+                    .saturating_add(1);
+            }
+            BlockReason::CookieMismatchGuard => {
+                self.metrics.ip_block_hits_cookie_mismatch_guard = self
+                    .metrics
+                    .ip_block_hits_cookie_mismatch_guard
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    fn record_new_block(&mut self, reason: BlockReason) {
+        self.metrics.addresses_blocked = self.metrics.addresses_blocked.saturating_add(1);
+        match reason {
+            BlockReason::RateExceeded => {
+                self.metrics.addresses_blocked_rate_exceeded = self
+                    .metrics
+                    .addresses_blocked_rate_exceeded
+                    .saturating_add(1);
+            }
+            BlockReason::Manual => {
+                self.metrics.addresses_blocked_manual =
+                    self.metrics.addresses_blocked_manual.saturating_add(1);
+            }
+            BlockReason::HandshakeHeuristic => {
+                self.metrics.addresses_blocked_handshake_heuristic = self
+                    .metrics
+                    .addresses_blocked_handshake_heuristic
+                    .saturating_add(1);
+            }
+            BlockReason::CookieMismatchGuard => {
+                self.metrics.addresses_blocked_cookie_mismatch_guard = self
+                    .metrics
+                    .addresses_blocked_cookie_mismatch_guard
+                    .saturating_add(1);
+            }
         }
     }
 
@@ -287,7 +403,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
-    use super::{RateLimitDecision, RateLimiter};
+    use super::{BlockReason, RateLimitDecision, RateLimiter};
 
     #[test]
     fn per_ip_limit_transitions_to_blocked() {
@@ -299,13 +415,15 @@ mod tests {
         assert_eq!(
             limiter.check(ip, now),
             RateLimitDecision::IpBlocked {
-                newly_blocked: true
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
             }
         );
         assert_eq!(
             limiter.check(ip, now),
             RateLimitDecision::IpBlocked {
-                newly_blocked: false
+                newly_blocked: false,
+                reason: BlockReason::RateExceeded,
             }
         );
     }
@@ -349,7 +467,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip, now),
             RateLimitDecision::IpBlocked {
-                newly_blocked: true
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
             }
         );
         assert_eq!(limiter.metrics_snapshot().blocked_addresses, 1);
@@ -384,7 +503,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip_b, start),
             RateLimitDecision::IpBlocked {
-                newly_blocked: true
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
             }
         );
 
@@ -409,7 +529,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip, next_window),
             RateLimitDecision::IpBlocked {
-                newly_blocked: true
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
             }
         );
     }
@@ -424,7 +545,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip, now),
             RateLimitDecision::IpBlocked {
-                newly_blocked: true
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
             }
         );
 
@@ -469,7 +591,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip, now),
             RateLimitDecision::IpBlocked {
-                newly_blocked: false
+                newly_blocked: false,
+                reason: BlockReason::Manual,
             }
         );
 
@@ -477,7 +600,8 @@ mod tests {
         assert_eq!(
             limiter.check(ip, now + Duration::from_secs(61)),
             RateLimitDecision::IpBlocked {
-                newly_blocked: false
+                newly_blocked: false,
+                reason: BlockReason::Manual,
             }
         );
 
@@ -486,5 +610,74 @@ mod tests {
             limiter.check(ip, now + Duration::from_secs(62)),
             RateLimitDecision::Allow
         );
+    }
+
+    #[test]
+    fn reason_specific_block_metrics_are_tracked() {
+        let mut limiter = RateLimiter::new(1, 100, Duration::from_secs(1), Duration::from_secs(5));
+        let now = Instant::now();
+
+        let rate_ip = IpAddr::V4(Ipv4Addr::new(10, 20, 0, 1));
+        let manual_ip = IpAddr::V4(Ipv4Addr::new(10, 20, 0, 2));
+        let handshake_ip = IpAddr::V4(Ipv4Addr::new(10, 20, 0, 3));
+        let cookie_ip = IpAddr::V4(Ipv4Addr::new(10, 20, 0, 4));
+
+        assert_eq!(limiter.check(rate_ip, now), RateLimitDecision::Allow);
+        assert_eq!(
+            limiter.check(rate_ip, now),
+            RateLimitDecision::IpBlocked {
+                newly_blocked: true,
+                reason: BlockReason::RateExceeded,
+            }
+        );
+
+        assert!(limiter.block_address(manual_ip));
+        assert_eq!(
+            limiter.check(manual_ip, now),
+            RateLimitDecision::IpBlocked {
+                newly_blocked: false,
+                reason: BlockReason::Manual,
+            }
+        );
+
+        assert!(limiter.block_address_for_with_reason(
+            handshake_ip,
+            now,
+            Duration::from_secs(30),
+            BlockReason::HandshakeHeuristic
+        ));
+        assert_eq!(
+            limiter.check(handshake_ip, now),
+            RateLimitDecision::IpBlocked {
+                newly_blocked: false,
+                reason: BlockReason::HandshakeHeuristic,
+            }
+        );
+
+        assert!(limiter.block_address_for_with_reason(
+            cookie_ip,
+            now,
+            Duration::from_secs(30),
+            BlockReason::CookieMismatchGuard
+        ));
+        assert_eq!(
+            limiter.check(cookie_ip, now),
+            RateLimitDecision::IpBlocked {
+                newly_blocked: false,
+                reason: BlockReason::CookieMismatchGuard,
+            }
+        );
+
+        let metrics = limiter.metrics_snapshot();
+        assert_eq!(metrics.ip_block_hits, 4);
+        assert_eq!(metrics.ip_block_hits_rate_exceeded, 1);
+        assert_eq!(metrics.ip_block_hits_manual, 1);
+        assert_eq!(metrics.ip_block_hits_handshake_heuristic, 1);
+        assert_eq!(metrics.ip_block_hits_cookie_mismatch_guard, 1);
+        assert_eq!(metrics.addresses_blocked, 4);
+        assert_eq!(metrics.addresses_blocked_rate_exceeded, 1);
+        assert_eq!(metrics.addresses_blocked_manual, 1);
+        assert_eq!(metrics.addresses_blocked_handshake_heuristic, 1);
+        assert_eq!(metrics.addresses_blocked_cookie_mismatch_guard, 1);
     }
 }

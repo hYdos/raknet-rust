@@ -34,7 +34,8 @@ use crate::session::{
 use super::config::{Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning};
 use super::proxy::{InboundProxyRoute, OutboundProxyRoute, ProxyRouter};
 use super::rate_limiter::{
-    RateLimitDecision, RateLimiter, RateLimiterConfigSnapshot, RateLimiterMetricsSnapshot,
+    BlockReason, RateLimitDecision, RateLimiter, RateLimiterConfigSnapshot,
+    RateLimiterMetricsSnapshot,
 };
 use super::session_pipeline::{
     PipelineFrameAction, SessionPipeline, SessionPipelineMetricsSnapshot,
@@ -156,7 +157,15 @@ pub struct TransportMetricsSnapshot {
     pub unhandled_frames_dropped: u64,
     pub rate_global_limit_hits: u64,
     pub rate_ip_block_hits: u64,
+    pub rate_ip_block_hits_rate_exceeded: u64,
+    pub rate_ip_block_hits_manual: u64,
+    pub rate_ip_block_hits_handshake_heuristic: u64,
+    pub rate_ip_block_hits_cookie_mismatch_guard: u64,
     pub rate_addresses_blocked: u64,
+    pub rate_addresses_blocked_rate_exceeded: u64,
+    pub rate_addresses_blocked_manual: u64,
+    pub rate_addresses_blocked_handshake_heuristic: u64,
+    pub rate_addresses_blocked_cookie_mismatch_guard: u64,
     pub rate_addresses_unblocked: u64,
     pub rate_blocked_addresses: usize,
     pub rate_exception_addresses: usize,
@@ -620,7 +629,7 @@ impl TransportServer {
             RateLimitDecision::GlobalLimit => {
                 return Ok(TransportEvent::RateLimited { addr });
             }
-            RateLimitDecision::IpBlocked { newly_blocked } => {
+            RateLimitDecision::IpBlocked { newly_blocked, .. } => {
                 if is_offline && newly_blocked {
                     self.send_connection_banned(addr).await?;
                 }
@@ -988,7 +997,16 @@ impl TransportServer {
         let r: RateLimiterMetricsSnapshot = self.rate_limiter.metrics_snapshot();
         total.rate_global_limit_hits = r.global_limit_hits;
         total.rate_ip_block_hits = r.ip_block_hits;
+        total.rate_ip_block_hits_rate_exceeded = r.ip_block_hits_rate_exceeded;
+        total.rate_ip_block_hits_manual = r.ip_block_hits_manual;
+        total.rate_ip_block_hits_handshake_heuristic = r.ip_block_hits_handshake_heuristic;
+        total.rate_ip_block_hits_cookie_mismatch_guard = r.ip_block_hits_cookie_mismatch_guard;
         total.rate_addresses_blocked = r.addresses_blocked;
+        total.rate_addresses_blocked_rate_exceeded = r.addresses_blocked_rate_exceeded;
+        total.rate_addresses_blocked_manual = r.addresses_blocked_manual;
+        total.rate_addresses_blocked_handshake_heuristic = r.addresses_blocked_handshake_heuristic;
+        total.rate_addresses_blocked_cookie_mismatch_guard =
+            r.addresses_blocked_cookie_mismatch_guard;
         total.rate_addresses_unblocked = r.addresses_unblocked;
         total.rate_blocked_addresses = r.blocked_addresses;
         total.rate_exception_addresses = r.exception_addresses;
@@ -1727,9 +1745,12 @@ impl TransportServer {
         state.window_started_at = now;
         state.mismatches = 0;
 
-        let newly_blocked = self
-            .rate_limiter
-            .block_address_for(ip, now, guard.block_duration);
+        let newly_blocked = self.rate_limiter.block_address_for_with_reason(
+            ip,
+            now,
+            guard.block_duration,
+            BlockReason::CookieMismatchGuard,
+        );
         if newly_blocked {
             self.cookie_mismatch_blocks = self.cookie_mismatch_blocks.saturating_add(1);
         }
@@ -1795,9 +1816,12 @@ impl TransportServer {
             return false;
         }
 
-        let newly_blocked = self
-            .rate_limiter
-            .block_address_for(addr.ip(), now, h.block_duration);
+        let newly_blocked = self.rate_limiter.block_address_for_with_reason(
+            addr.ip(),
+            now,
+            h.block_duration,
+            BlockReason::HandshakeHeuristic,
+        );
         if newly_blocked {
             self.handshake_auto_blocks = self.handshake_auto_blocks.saturating_add(1);
         }
@@ -2580,6 +2604,7 @@ mod tests {
             assert_eq!(metrics.cookie_mismatch_drops, 1);
             assert_eq!(metrics.cookie_mismatch_blocks, 1);
             assert_eq!(metrics.rate_blocked_addresses, 1);
+            assert_eq!(metrics.rate_addresses_blocked_cookie_mismatch_guard, 1);
         });
     }
 
@@ -2695,6 +2720,7 @@ mod tests {
         let metrics = server.metrics_snapshot();
         assert_eq!(metrics.handshake_auto_blocks, 1);
         assert_eq!(metrics.rate_blocked_addresses, 1);
+        assert_eq!(metrics.rate_addresses_blocked_handshake_heuristic, 1);
     }
 
     #[test]
@@ -2923,7 +2949,9 @@ mod tests {
 
         assert!(server.block_address(ip));
         assert!(!server.block_address(ip));
-        assert_eq!(server.metrics_snapshot().rate_blocked_addresses, 1);
+        let metrics_after_block = server.metrics_snapshot();
+        assert_eq!(metrics_after_block.rate_blocked_addresses, 1);
+        assert_eq!(metrics_after_block.rate_addresses_blocked_manual, 1);
 
         assert!(server.unblock_address(ip));
         assert_eq!(server.metrics_snapshot().rate_blocked_addresses, 0);
