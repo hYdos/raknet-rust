@@ -1,0 +1,19 @@
+[package]
+name = "mcbe-raknet-rs"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+bitflags = "2.6"
+bytes = "1.8"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["net", "rt", "sync", "time", "macros"] }
+socket2 = "0.6"
+libc = "0.2"
+getrandom = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+proptest = "1.6"
