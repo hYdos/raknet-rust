@@ -79,6 +79,15 @@ async fn listener_accepts_and_exchanges_payloads() -> io::Result<()> {
         .await
         .expect("timed out waiting for accepted connection")
         .expect("listener accept failed");
+    let connection_meta = connection.metadata();
+    let client_local = client.local_addr()?;
+    assert_ne!(connection_meta.id().as_u64(), 0);
+    assert_eq!(connection_meta.remote_addr().port(), client_local.port());
+    assert!(
+        connection_meta.remote_addr().ip().is_loopback(),
+        "accepted remote addr should resolve to loopback, got {}",
+        connection_meta.remote_addr()
+    );
 
     let c2s = Bytes::from_static(b"\xferaknet-compat-c2s");
     client.send(c2s.clone()).await?;
@@ -88,7 +97,7 @@ async fn listener_accepts_and_exchanges_payloads() -> io::Result<()> {
 
     let s2c = Bytes::from_static(b"\xferaknet-compat-s2c");
     connection
-        .send(s2c.as_ref(), true)
+        .send(s2c.as_ref())
         .await
         .expect("connection send should succeed");
 

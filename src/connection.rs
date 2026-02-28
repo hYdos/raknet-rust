@@ -11,10 +11,66 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::server::{PeerDisconnectReason, PeerId, SendOptions};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionId(u64);
+
+impl ConnectionId {
+    pub const fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<PeerId> for ConnectionId {
+    fn from(value: PeerId) -> Self {
+        Self::from_u64(value.as_u64())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionMetadata {
+    id: ConnectionId,
+    remote_addr: SocketAddr,
+}
+
+impl ConnectionMetadata {
+    pub const fn id(self) -> ConnectionId {
+        self.id
+    }
+
+    pub const fn remote_addr(self) -> SocketAddr {
+        self.remote_addr
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteDisconnectReason {
+    Requested,
+    RemoteDisconnectionNotification { reason_code: Option<u8> },
+    RemoteDetectLostConnection,
+    WorkerStopped { shard_id: usize },
+}
+
+impl From<PeerDisconnectReason> for RemoteDisconnectReason {
+    fn from(value: PeerDisconnectReason) -> Self {
+        match value {
+            PeerDisconnectReason::Requested => Self::Requested,
+            PeerDisconnectReason::RemoteDisconnectionNotification { reason_code } => {
+                Self::RemoteDisconnectionNotification { reason_code }
+            }
+            PeerDisconnectReason::RemoteDetectLostConnection => Self::RemoteDetectLostConnection,
+            PeerDisconnectReason::WorkerStopped { shard_id } => Self::WorkerStopped { shard_id },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionCloseReason {
     RequestedByLocal,
-    PeerDisconnected(PeerDisconnectReason),
+    PeerDisconnected(RemoteDisconnectReason),
     ListenerStopped,
     InboundBackpressure,
     TransportError(String),
@@ -105,7 +161,8 @@ impl ConnectionSharedState {
 }
 
 pub struct Connection {
-    pub address: SocketAddr,
+    remote_addr: SocketAddr,
+    id: ConnectionId,
     peer_id: PeerId,
     command_tx: mpsc::Sender<ConnectionCommand>,
     inbound_rx: mpsc::Receiver<ConnectionInbound>,
@@ -121,7 +178,8 @@ impl Connection {
         shared: Arc<ConnectionSharedState>,
     ) -> Self {
         Self {
-            address,
+            remote_addr: address,
+            id: ConnectionId::from(peer_id),
             peer_id,
             command_tx,
             inbound_rx,
@@ -129,7 +187,22 @@ impl Connection {
         }
     }
 
-    pub fn peer_id(&self) -> PeerId {
+    pub fn id(&self) -> ConnectionId {
+        self.id
+    }
+
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    pub fn metadata(&self) -> ConnectionMetadata {
+        ConnectionMetadata {
+            id: self.id,
+            remote_addr: self.remote_addr,
+        }
+    }
+
+    pub(crate) fn peer_id(&self) -> PeerId {
         self.peer_id
     }
 
@@ -137,7 +210,7 @@ impl Connection {
         self.shared.close_reason()
     }
 
-    pub async fn send_with_options(
+    pub(crate) async fn send_with_options(
         &self,
         payload: impl Into<Bytes>,
         options: SendOptions,
@@ -173,12 +246,17 @@ impl Connection {
             .await
     }
 
-    pub async fn send(
-        &mut self,
+    pub async fn send(&self, payload: impl AsRef<[u8]>) -> Result<(), queue::SendQueueError> {
+        self.send_bytes(Bytes::copy_from_slice(payload.as_ref()))
+            .await
+    }
+
+    pub async fn send_compat(
+        &self,
         stream: &[u8],
         _immediate: bool,
     ) -> Result<(), queue::SendQueueError> {
-        self.send_bytes(Bytes::copy_from_slice(stream)).await
+        self.send(stream).await
     }
 
     pub async fn recv_bytes(&mut self) -> Result<Bytes, RecvError> {

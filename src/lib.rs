@@ -11,5 +11,8 @@ pub mod session;
 pub mod telemetry;
 pub mod transport;
 
+pub use connection::{
+    Connection, ConnectionCloseReason, ConnectionId, ConnectionMetadata, RecvError,
+};
 pub use error::{ConfigValidationError, DecodeError, EncodeError};
-pub use listener::Listener;
+pub use listener::{Listener, ListenerMetadata};

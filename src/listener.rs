@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::connection::{
     Connection, ConnectionCloseReason, ConnectionCommand, ConnectionInbound, ConnectionSharedState,
+    RemoteDisconnectReason,
 };
 use crate::error::server::ServerError;
 use crate::server::{PeerId, RaknetServer, RaknetServerEvent};
@@ -41,6 +42,32 @@ pub struct Listener {
     runtime: Option<ListenerRuntime>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerMetadata {
+    bind_addr: SocketAddr,
+    started: bool,
+    shard_count: usize,
+    advertisement: String,
+}
+
+impl ListenerMetadata {
+    pub const fn bind_addr(&self) -> SocketAddr {
+        self.bind_addr
+    }
+
+    pub const fn started(&self) -> bool {
+        self.started
+    }
+
+    pub const fn shard_count(&self) -> usize {
+        self.shard_count
+    }
+
+    pub fn advertisement(&self) -> &str {
+        &self.advertisement
+    }
+}
+
 impl Listener {
     pub async fn bind(bind_addr: SocketAddr) -> Result<Self, ServerError> {
         let transport_config = TransportConfig {
@@ -57,14 +84,6 @@ impl Listener {
             command_queue_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             runtime: None,
         })
-    }
-
-    pub fn transport_config_mut(&mut self) -> &mut TransportConfig {
-        &mut self.transport_config
-    }
-
-    pub fn runtime_config_mut(&mut self) -> &mut ShardedRuntimeConfig {
-        &mut self.runtime_config
     }
 
     pub fn set_pong_data(&mut self, data: impl Into<String>) {
@@ -85,6 +104,23 @@ impl Listener {
 
     pub fn set_command_queue_capacity(&mut self, capacity: usize) {
         self.command_queue_capacity = capacity.max(1);
+    }
+
+    pub fn set_shard_count(&mut self, shard_count: usize) {
+        self.runtime_config.shard_count = shard_count.max(1);
+    }
+
+    pub fn bind_addr(&self) -> SocketAddr {
+        self.bind_addr
+    }
+
+    pub fn metadata(&self) -> ListenerMetadata {
+        ListenerMetadata {
+            bind_addr: self.bind_addr,
+            started: self.runtime.is_some(),
+            shard_count: self.runtime_config.shard_count.max(1),
+            advertisement: self.transport_config.advertisement.clone(),
+        }
     }
 
     pub fn is_started(&self) -> bool {
@@ -300,7 +336,12 @@ async fn run_listener_worker(
                     }
                     RaknetServerEvent::PeerDisconnected { peer_id, reason, .. } => {
                         if let Some(entry) = remove_peer(&mut peers, &mut peer_ids_by_addr, peer_id) {
-                            close_peer_entry(entry, ConnectionCloseReason::PeerDisconnected(reason));
+                            close_peer_entry(
+                                entry,
+                                ConnectionCloseReason::PeerDisconnected(
+                                    RemoteDisconnectReason::from(reason),
+                                ),
+                            );
                         }
                     }
                     RaknetServerEvent::Packet { peer_id, payload, .. } => {

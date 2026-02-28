@@ -38,6 +38,41 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+### Listener Facade (accept/send/recv/close/metadata)
+
+```rust
+use std::net::SocketAddr;
+use mcbe_raknet_rs::listener::Listener;
+use mcbe_raknet_rs::connection::RecvError;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let bind = SocketAddr::from(([0, 0, 0, 0], 19132));
+    let mut listener = Listener::bind(bind).await?;
+    listener.start().await?;
+
+    loop {
+        let mut conn = listener.accept().await?;
+        let meta = conn.metadata();
+        println!("peer={} addr={}", meta.id().as_u64(), meta.remote_addr());
+
+        tokio::spawn(async move {
+            loop {
+                match conn.recv_bytes().await {
+                    Ok(payload) => {
+                        if conn.send_bytes(payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::ConnectionClosed { .. }) | Err(RecvError::ChannelClosed) => break,
+                    Err(RecvError::DecodeError { .. }) => {}
+                }
+            }
+        });
+    }
+}
+```
+
 ### Basic Client
 
 ```rust
@@ -74,6 +109,13 @@ Soak example:
 
 ```bash
 cargo run --example raknet_soak -- --sessions=512 --ticks=2000 --payload-bytes=180
+```
+
+Listener facade echo/proxy example:
+
+```bash
+cargo run --example listener_facade -- --listen 0.0.0.0:19132
+cargo run --example listener_facade -- --listen 0.0.0.0:19132 --upstream 127.0.0.1:19133
 ```
 
 ## License
