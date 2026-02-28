@@ -67,6 +67,33 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+Callback facade (`on_connect / on_packet / on_disconnect`):
+
+```rust
+use std::pin::Pin;
+use std::future::Future;
+use raknet_rust::server::RaknetServer;
+
+fn hook_ok<'a>() -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+    Box::pin(async { Ok(()) })
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let mut server = RaknetServer::bind("0.0.0.0:19132".parse().unwrap()).await?;
+    let mut facade = server
+        .facade()
+        .on_connect(|_server, _event| hook_ok())
+        .on_packet(|server, event| Box::pin(async move {
+            server.send(event.peer_id, event.payload).await?;
+            Ok(())
+        }))
+        .on_disconnect(|_server, _event| hook_ok());
+
+    facade.run().await
+}
+```
+
 Listener incoming helper:
 
 ```rust

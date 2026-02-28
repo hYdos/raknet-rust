@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 
 use bytes::Bytes;
 use tracing::{debug, info, warn};
@@ -126,6 +128,187 @@ impl RaknetServerEvent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectEvent {
+    pub peer_id: PeerId,
+    pub addr: SocketAddr,
+    pub shard_id: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PacketEvent {
+    pub peer_id: PeerId,
+    pub addr: SocketAddr,
+    pub payload: Bytes,
+    pub reliability: Reliability,
+    pub reliable_index: Option<Sequence24>,
+    pub sequence_index: Option<Sequence24>,
+    pub ordering_index: Option<Sequence24>,
+    pub ordering_channel: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisconnectEvent {
+    pub peer_id: PeerId,
+    pub addr: SocketAddr,
+    pub reason: PeerDisconnectReason,
+}
+
+pub type ServerHookFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+type ConnectHandler =
+    Box<dyn for<'a> FnMut(&'a mut RaknetServer, ConnectEvent) -> ServerHookFuture<'a> + Send>;
+type PacketHandler =
+    Box<dyn for<'a> FnMut(&'a mut RaknetServer, PacketEvent) -> ServerHookFuture<'a> + Send>;
+type DisconnectHandler =
+    Box<dyn for<'a> FnMut(&'a mut RaknetServer, DisconnectEvent) -> ServerHookFuture<'a> + Send>;
+
+pub struct ServerFacade<'a> {
+    server: &'a mut RaknetServer,
+    on_connect: Option<ConnectHandler>,
+    on_packet: Option<PacketHandler>,
+    on_disconnect: Option<DisconnectHandler>,
+}
+
+impl<'a> ServerFacade<'a> {
+    pub fn new(server: &'a mut RaknetServer) -> Self {
+        Self {
+            server,
+            on_connect: None,
+            on_packet: None,
+            on_disconnect: None,
+        }
+    }
+
+    pub fn on_connect<F>(mut self, handler: F) -> Self
+    where
+        F: for<'b> FnMut(&'b mut RaknetServer, ConnectEvent) -> ServerHookFuture<'b>
+            + Send
+            + 'static,
+    {
+        self.on_connect = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_packet<F>(mut self, handler: F) -> Self
+    where
+        F: for<'b> FnMut(&'b mut RaknetServer, PacketEvent) -> ServerHookFuture<'b>
+            + Send
+            + 'static,
+    {
+        self.on_packet = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_disconnect<F>(mut self, handler: F) -> Self
+    where
+        F: for<'b> FnMut(&'b mut RaknetServer, DisconnectEvent) -> ServerHookFuture<'b>
+            + Send
+            + 'static,
+    {
+        self.on_disconnect = Some(Box::new(handler));
+        self
+    }
+
+    pub async fn next(&mut self) -> io::Result<bool> {
+        let Some(event) = self.server.next_event().await else {
+            return Ok(false);
+        };
+        self.dispatch(event).await?;
+        Ok(true)
+    }
+
+    pub async fn run(&mut self) -> io::Result<()> {
+        while self.next().await? {}
+        Ok(())
+    }
+
+    pub fn server(&self) -> &RaknetServer {
+        self.server
+    }
+
+    pub fn server_mut(&mut self) -> &mut RaknetServer {
+        self.server
+    }
+
+    async fn dispatch(&mut self, event: RaknetServerEvent) -> io::Result<()> {
+        match event {
+            RaknetServerEvent::PeerConnected {
+                peer_id,
+                addr,
+                shard_id,
+            } => {
+                if let Some(handler) = self.on_connect.as_mut() {
+                    handler(
+                        self.server,
+                        ConnectEvent {
+                            peer_id,
+                            addr,
+                            shard_id,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            RaknetServerEvent::Packet {
+                peer_id,
+                addr,
+                payload,
+                reliability,
+                reliable_index,
+                sequence_index,
+                ordering_index,
+                ordering_channel,
+            } => {
+                if let Some(handler) = self.on_packet.as_mut() {
+                    handler(
+                        self.server,
+                        PacketEvent {
+                            peer_id,
+                            addr,
+                            payload,
+                            reliability,
+                            reliable_index,
+                            sequence_index,
+                            ordering_index,
+                            ordering_channel,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            RaknetServerEvent::PeerDisconnected {
+                peer_id,
+                addr,
+                reason,
+            } => {
+                if let Some(handler) = self.on_disconnect.as_mut() {
+                    handler(
+                        self.server,
+                        DisconnectEvent {
+                            peer_id,
+                            addr,
+                            reason,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            RaknetServerEvent::OfflinePacket { .. }
+            | RaknetServerEvent::ReceiptAcked { .. }
+            | RaknetServerEvent::PeerRateLimited { .. }
+            | RaknetServerEvent::SessionLimitReached { .. }
+            | RaknetServerEvent::ProxyDropped { .. }
+            | RaknetServerEvent::DecodeError { .. }
+            | RaknetServerEvent::WorkerError { .. }
+            | RaknetServerEvent::WorkerStopped { .. }
+            | RaknetServerEvent::Metrics { .. } => {}
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RaknetServerBuilder {
     transport_config: TransportConfig,
@@ -193,6 +376,10 @@ impl RaknetServer {
 
     pub async fn bind(bind_addr: SocketAddr) -> io::Result<Self> {
         Self::builder().bind_addr(bind_addr).start().await
+    }
+
+    pub fn facade(&mut self) -> ServerFacade<'_> {
+        ServerFacade::new(self)
     }
 
     pub async fn start_with_configs(
