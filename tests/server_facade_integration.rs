@@ -8,19 +8,19 @@ use raknet_rust::handshake::{
     OfflinePacket, OpenConnectionRequest1, OpenConnectionRequest2, Request2ParsePath,
     UnconnectedPing,
 };
-use raknet_rust::protocol::connected::{
+use raknet_rust::low_level::protocol::connected::{
     ConnectedControlPacket, ConnectionRequest, NewIncomingConnection, SYSTEM_ADDRESS_COUNT,
 };
-use raknet_rust::protocol::constants::{
+use raknet_rust::low_level::protocol::constants::{
     DEFAULT_UNCONNECTED_MAGIC, DatagramFlags, RAKNET_PROTOCOL_VERSION,
 };
-use raknet_rust::protocol::datagram::{Datagram, DatagramHeader, DatagramPayload};
-use raknet_rust::protocol::frame::Frame;
-use raknet_rust::protocol::frame_header::FrameHeader;
-use raknet_rust::protocol::reliability::Reliability;
-use raknet_rust::protocol::sequence24::Sequence24;
+use raknet_rust::low_level::protocol::datagram::{Datagram, DatagramHeader, DatagramPayload};
+use raknet_rust::low_level::protocol::frame::Frame;
+use raknet_rust::low_level::protocol::frame_header::FrameHeader;
+use raknet_rust::low_level::protocol::reliability::Reliability;
+use raknet_rust::low_level::protocol::sequence24::Sequence24;
+use raknet_rust::low_level::transport::EventOverflowPolicy;
 use raknet_rust::server::{PeerId, RaknetServer, RaknetServerEvent};
-use raknet_rust::transport::EventOverflowPolicy;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep, timeout};
 

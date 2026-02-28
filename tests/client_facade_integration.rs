@@ -7,9 +7,11 @@ use raknet_rust::client::{
     ClientDisconnectReason, ClientSendOptions, OfflineRejectionReason, RaknetClient,
     RaknetClientConfig, RaknetClientError, RaknetClientEvent, ReconnectPolicy,
 };
-use raknet_rust::protocol::connected::{ConnectedControlPacket, DisconnectionNotification};
+use raknet_rust::low_level::protocol::connected::{
+    ConnectedControlPacket, DisconnectionNotification,
+};
+use raknet_rust::low_level::transport::EventOverflowPolicy;
 use raknet_rust::server::{PeerId, RaknetServer, RaknetServerEvent};
-use raknet_rust::transport::EventOverflowPolicy;
 use tokio::time::timeout;
 
 fn allocate_loopback_bind_addr() -> SocketAddr {

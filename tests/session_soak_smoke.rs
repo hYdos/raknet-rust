@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use raknet_rust::protocol::ack::{AckNackPayload, SequenceRange};
-use raknet_rust::protocol::datagram::DatagramPayload;
-use raknet_rust::protocol::reliability::Reliability;
-use raknet_rust::session::tunables::SessionTunables;
-use raknet_rust::session::{QueuePayloadResult, RakPriority, Session};
+use raknet_rust::low_level::protocol::ack::{AckNackPayload, SequenceRange};
+use raknet_rust::low_level::protocol::datagram::DatagramPayload;
+use raknet_rust::low_level::protocol::reliability::Reliability;
+use raknet_rust::low_level::session::tunables::SessionTunables;
+use raknet_rust::low_level::session::{QueuePayloadResult, RakPriority, Session};
 
 #[test]
 fn multi_session_loss_and_reorder_soak_smoke_stays_bounded() {

@@ -3,10 +3,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use bytes::BytesMut;
 use proptest::prelude::*;
 use raknet_rust::handshake::OfflinePacket;
-use raknet_rust::protocol::ack::{AckNackPayload, SequenceRange};
-use raknet_rust::protocol::codec::RaknetCodec;
-use raknet_rust::protocol::datagram::Datagram;
-use raknet_rust::protocol::sequence24::Sequence24;
+use raknet_rust::low_level::protocol::ack::{AckNackPayload, SequenceRange};
+use raknet_rust::low_level::protocol::codec::RaknetCodec;
+use raknet_rust::low_level::protocol::datagram::Datagram;
+use raknet_rust::low_level::protocol::sequence24::Sequence24;
 
 proptest! {
     #![proptest_config(ProptestConfig {

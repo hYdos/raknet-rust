@@ -20,6 +20,11 @@ usable as a general RakNet library.
 raknet-rust = { path = "../raknet-rust" }
 ```
 
+## API Surface
+
+- Stable application API lives under `client`, `server`, `listener`, `connection` and root re-exports.
+- Advanced low-level API is namespaced under `raknet_rust::low_level::{protocol, session, transport}`.
+
 ### Usage
 
 Basic server:

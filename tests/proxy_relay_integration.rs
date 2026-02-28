@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use raknet_rust::client::{ClientSendOptions, RaknetClient, RaknetClientEvent};
-use raknet_rust::protocol::reliability::Reliability;
+use raknet_rust::low_level::protocol::reliability::Reliability;
+use raknet_rust::low_level::session::RakPriority;
+use raknet_rust::low_level::transport::EventOverflowPolicy;
 use raknet_rust::proxy::{
     PassthroughRelayPolicy, RaknetRelayProxy, RaknetRelayProxyEvent, RelayContract,
     RelayContractConfig, RelayDecision, RelayDirection, RelayDropReason, RelayOverflowPolicy,
@@ -12,8 +14,6 @@ use raknet_rust::proxy::{
     UpstreamConnectorConfig,
 };
 use raknet_rust::server::{PeerId, RaknetServer, RaknetServerEvent, SendOptions};
-use raknet_rust::session::RakPriority;
-use raknet_rust::transport::EventOverflowPolicy;
 use tokio::time::timeout;
 
 fn allocate_loopback_bind_addr() -> SocketAddr {
