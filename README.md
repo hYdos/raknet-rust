@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-2024_edition-000000?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Alpha-orange)](#)
+[![Status](https://img.shields.io/badge/Status-Stable-brightgreen)](#)
 [![Platform](https://img.shields.io/badge/Platform-%20RakNet-2ea44f)](#)
 
 `raknet-rust` is a RakNet transport library written in Rust.

@@ -6,8 +6,12 @@ on:
 
 jobs:
   fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
+    name: Rustfmt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -18,8 +22,12 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,22 +35,23 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy (gate)
-        run: >
-          cargo clippy --lib --all-features --
-          -D warnings
-          -A clippy::too_many_arguments
-          -A clippy::derivable_impls
-          -A clippy::collapsible_if
+        run: cargo clippy --lib --all-features -- -D warnings -A clippy::too_many_arguments -A clippy::derivable_impls -A clippy::collapsible_if
 
   test:
-    name: Test Suite
-    runs-on: ubuntu-latest
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test -q
+      - name: cargo check examples
+        run: cargo check --examples -q
 
   smoke:
     name: Smoke (short soak)
