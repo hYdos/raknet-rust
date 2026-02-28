@@ -112,6 +112,45 @@ async fn listener_accepts_and_exchanges_payloads() -> io::Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn listener_incoming_yields_connections() -> io::Result<()> {
+    let bind_addr = allocate_loopback_bind_addr();
+    let mut listener = Listener::bind(bind_addr)
+        .await
+        .expect("listener bind should succeed");
+    listener
+        .start()
+        .await
+        .expect("listener start should succeed");
+
+    let mut client = RaknetClient::connect(bind_addr).await?;
+    wait_for_client_connected(&mut client).await;
+
+    let connection_meta = {
+        let mut incoming = listener
+            .incoming()
+            .expect("incoming stream should be available after start");
+        let connection = timeout(Duration::from_secs(3), incoming.next())
+            .await
+            .expect("timed out waiting for incoming connection")
+            .expect("incoming stream closed unexpectedly");
+        connection.metadata()
+    };
+
+    let client_local = client.local_addr()?;
+    assert_ne!(connection_meta.id().as_u64(), 0);
+    assert_eq!(connection_meta.remote_addr().port(), client_local.port());
+    assert!(
+        connection_meta.remote_addr().ip().is_loopback(),
+        "incoming remote addr should resolve to loopback, got {}",
+        connection_meta.remote_addr()
+    );
+
+    let _ = client.disconnect(None).await;
+    listener.stop().await.expect("listener stop should succeed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn listener_stop_closes_accepted_connection() {
     let bind_addr = allocate_loopback_bind_addr();
     let mut listener = Listener::bind(bind_addr)

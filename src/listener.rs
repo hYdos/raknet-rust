@@ -32,6 +32,10 @@ struct PeerRuntime {
     shared: Arc<ConnectionSharedState>,
 }
 
+pub struct Incoming<'a> {
+    accept_rx: &'a mut mpsc::Receiver<Connection>,
+}
+
 pub struct Listener {
     bind_addr: SocketAddr,
     transport_config: TransportConfig,
@@ -192,12 +196,26 @@ impl Listener {
     }
 
     pub async fn accept(&mut self) -> Result<Connection, ServerError> {
-        let runtime = self.runtime.as_mut().ok_or(ServerError::NotStarted)?;
-        runtime
-            .accept_rx
+        self.accept_receiver()?
             .recv()
             .await
             .ok_or(ServerError::AcceptChannelClosed)
+    }
+
+    pub fn incoming(&mut self) -> Result<Incoming<'_>, ServerError> {
+        let accept_rx = self.accept_receiver()?;
+        Ok(Incoming { accept_rx })
+    }
+
+    fn accept_receiver(&mut self) -> Result<&mut mpsc::Receiver<Connection>, ServerError> {
+        let runtime = self.runtime.as_mut().ok_or(ServerError::NotStarted)?;
+        Ok(&mut runtime.accept_rx)
+    }
+}
+
+impl Incoming<'_> {
+    pub async fn next(&mut self) -> Option<Connection> {
+        self.accept_rx.recv().await
     }
 }
 

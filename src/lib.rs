@@ -16,4 +16,4 @@ pub use connection::{
     Connection, ConnectionCloseReason, ConnectionId, ConnectionIo, ConnectionMetadata, RecvError,
 };
 pub use error::{ConfigValidationError, DecodeError, EncodeError};
-pub use listener::{Listener, ListenerMetadata};
+pub use listener::{Incoming, Listener, ListenerMetadata};

@@ -67,6 +67,28 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+Listener incoming helper:
+
+```rust
+use std::net::SocketAddr;
+use raknet_rust::Listener;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let bind: SocketAddr = "0.0.0.0:19132".parse().unwrap();
+    let mut listener = Listener::bind(bind).await?;
+    listener.start().await?;
+
+    let mut incoming = listener.incoming()?;
+    while let Some(conn) = incoming.next().await {
+        let meta = conn.metadata();
+        println!("accepted peer={} addr={}", meta.id().as_u64(), meta.remote_addr());
+    }
+
+    Ok(())
+}
+```
+
 ## Observability
 
 - The runtime emits `tracing` events (connect, disconnect, decode error, handshake reject/timeout).
