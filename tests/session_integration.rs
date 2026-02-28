@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use mcbe_raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
 use mcbe_raknet_rs::protocol::reliability::Reliability;
-use mcbe_raknet_rs::session::tunables::SessionTunables;
+use mcbe_raknet_rs::session::tunables::{CongestionProfile, SessionTunables};
 use mcbe_raknet_rs::session::{QueuePayloadResult, RakPriority, Session};
 
 fn default_tick(session: &mut Session, now: Instant, max_new_datagrams: usize) -> usize {
@@ -15,6 +15,7 @@ fn default_tick(session: &mut Session, now: Instant, max_new_datagrams: usize) -
 #[test]
 fn reliable_send_is_throttled_by_congestion_window_until_ack() {
     let tunables = SessionTunables {
+        congestion_profile: CongestionProfile::Custom,
         initial_congestion_window: 1.0,
         min_congestion_window: 1.0,
         max_congestion_window: 1.0,
@@ -106,6 +107,7 @@ fn karn_rule_skips_srtt_update_for_retransmitted_datagram() {
 #[test]
 fn resend_rto_is_clamped_to_configured_max() {
     let tunables = SessionTunables {
+        congestion_profile: CongestionProfile::Custom,
         resend_rto: Duration::from_millis(100),
         min_resend_rto: Duration::from_millis(80),
         max_resend_rto: Duration::from_millis(500),
@@ -137,6 +139,119 @@ fn resend_rto_is_clamped_to_configured_max() {
         snapshot.resend_rto_ms <= 500.0,
         "RTO must stay under configured max: {}",
         snapshot.resend_rto_ms
+    );
+}
+
+#[test]
+fn resend_rto_is_clamped_to_configured_min_after_fast_ack_samples() {
+    let tunables = SessionTunables {
+        congestion_profile: CongestionProfile::Custom,
+        resend_rto: Duration::from_millis(400),
+        min_resend_rto: Duration::from_millis(200),
+        max_resend_rto: Duration::from_millis(2_000),
+        ..SessionTunables::default()
+    };
+
+    let mut session = Session::with_tunables(200, tunables);
+    let start = Instant::now();
+
+    for i in 0..5 {
+        assert!(matches!(
+            session.queue_payload(
+                Bytes::from(vec![0xCD; 120]),
+                Reliability::ReliableOrdered,
+                0,
+                RakPriority::High
+            ),
+            QueuePayloadResult::Enqueued { .. }
+        ));
+        let send_at = start + Duration::from_millis((i * 10) as u64);
+        let sent = session.on_tick(send_at, 1, 64 * 1024, 0, 0);
+        assert_eq!(sent.len(), 1, "payload must be emitted for RTT sample");
+        let seq = sent[0].header.sequence;
+
+        session.handle_ack_payload(AckNackPayload {
+            ranges: vec![SequenceRange {
+                start: seq,
+                end: seq,
+            }],
+        });
+        let _ = session.process_incoming_receipts(send_at + Duration::from_millis(4));
+    }
+
+    let snapshot = session.metrics_snapshot();
+    assert!(
+        snapshot.resend_rto_ms >= 200.0,
+        "RTO must stay above configured min: {}",
+        snapshot.resend_rto_ms
+    );
+}
+
+#[test]
+fn high_latency_profile_is_less_aggressive_on_nack_loss_than_conservative() {
+    let now = Instant::now();
+
+    let mut conservative = Session::with_tunables(
+        200,
+        SessionTunables {
+            congestion_profile: CongestionProfile::Conservative,
+            ..SessionTunables::default()
+        },
+    );
+
+    let mut high_latency = Session::with_tunables(
+        200,
+        SessionTunables {
+            congestion_profile: CongestionProfile::HighLatency,
+            ..SessionTunables::default()
+        },
+    );
+
+    for session in [&mut conservative, &mut high_latency] {
+        assert!(matches!(
+            session.queue_payload(
+                Bytes::from(vec![0xCE; 120]),
+                Reliability::ReliableOrdered,
+                0,
+                RakPriority::High
+            ),
+            QueuePayloadResult::Enqueued { .. }
+        ));
+    }
+
+    let conservative_sent = conservative.on_tick(now, 1, 64 * 1024, 0, 0);
+    let high_latency_sent = high_latency.on_tick(now, 1, 64 * 1024, 0, 0);
+    assert_eq!(conservative_sent.len(), 1);
+    assert_eq!(high_latency_sent.len(), 1);
+
+    let conservative_before = conservative.metrics_snapshot().congestion_window_packets;
+    let high_latency_before = high_latency.metrics_snapshot().congestion_window_packets;
+
+    conservative.handle_nack_payload(AckNackPayload {
+        ranges: vec![SequenceRange {
+            start: conservative_sent[0].header.sequence,
+            end: conservative_sent[0].header.sequence,
+        }],
+    });
+    let _ = conservative.process_incoming_receipts(now + Duration::from_millis(1));
+    let conservative_after = conservative.metrics_snapshot().congestion_window_packets;
+
+    high_latency.handle_nack_payload(AckNackPayload {
+        ranges: vec![SequenceRange {
+            start: high_latency_sent[0].header.sequence,
+            end: high_latency_sent[0].header.sequence,
+        }],
+    });
+    let _ = high_latency.process_incoming_receipts(now + Duration::from_millis(1));
+    let high_latency_after = high_latency.metrics_snapshot().congestion_window_packets;
+
+    let conservative_ratio = conservative_after / conservative_before.max(1.0);
+    let high_latency_ratio = high_latency_after / high_latency_before.max(1.0);
+    assert!(
+        high_latency_ratio > conservative_ratio,
+        "high-latency profile should keep more cwnd on NACK loss (high={}, conservative={})",
+        high_latency_ratio,
+        conservative_ratio
     );
 }
 

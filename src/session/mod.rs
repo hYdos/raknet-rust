@@ -219,13 +219,14 @@ impl Session {
 
     pub fn with_tunables(mtu: usize, tunables: SessionTunables) -> Self {
         let now = Instant::now();
-        let min_cwnd = tunables.min_congestion_window.max(1.0);
-        let max_cwnd = tunables.max_congestion_window.max(min_cwnd);
-        let initial_cwnd = tunables
+        let congestion = tunables.resolved_congestion_settings();
+        let min_cwnd = congestion.min_congestion_window.max(1.0);
+        let max_cwnd = congestion.max_congestion_window.max(min_cwnd);
+        let initial_cwnd = congestion
             .initial_congestion_window
             .clamp(min_cwnd, max_cwnd)
             .max(1.0);
-        let slow_start_threshold = tunables
+        let slow_start_threshold = congestion
             .congestion_slow_start_threshold
             .clamp(min_cwnd, max_cwnd);
         let pacing_min_rate = tunables.pacing_min_rate_bytes_per_sec.max(1.0);
@@ -275,27 +276,29 @@ impl Session {
             incoming_nacks: VecDeque::new(),
             sent_datagrams: BTreeMap::new(),
             receipt_tracking: HashMap::new(),
-            resend_rto: tunables
+            resend_rto: congestion
                 .resend_rto
-                .clamp(tunables.min_resend_rto, tunables.max_resend_rto),
-            min_resend_rto: tunables.min_resend_rto,
-            max_resend_rto: tunables.max_resend_rto,
+                .clamp(congestion.min_resend_rto, congestion.max_resend_rto),
+            min_resend_rto: congestion.min_resend_rto,
+            max_resend_rto: congestion.max_resend_rto,
             srtt_ms: None,
             rttvar_ms: 0.0,
             congestion_window_packets: initial_cwnd,
             min_congestion_window_packets: min_cwnd,
             max_congestion_window_packets: max_cwnd,
             slow_start_threshold_packets: slow_start_threshold,
-            congestion_additive_gain: tunables.congestion_additive_gain.max(0.01),
-            congestion_multiplicative_decrease_nack: tunables
+            congestion_additive_gain: congestion.congestion_additive_gain.max(0.01),
+            congestion_multiplicative_decrease_nack: congestion
                 .congestion_multiplicative_decrease_nack
                 .clamp(0.1, 0.99),
-            congestion_multiplicative_decrease_timeout: tunables
+            congestion_multiplicative_decrease_timeout: congestion
                 .congestion_multiplicative_decrease_timeout
                 .clamp(0.1, 0.99),
-            high_rtt_threshold_ms: tunables.congestion_high_rtt_threshold_ms.max(1.0),
-            high_rtt_additive_scale: tunables.congestion_high_rtt_additive_scale.clamp(0.05, 1.0),
-            nack_loss_backoff_cooldown: tunables
+            high_rtt_threshold_ms: congestion.congestion_high_rtt_threshold_ms.max(1.0),
+            high_rtt_additive_scale: congestion
+                .congestion_high_rtt_additive_scale
+                .clamp(0.05, 1.0),
+            nack_loss_backoff_cooldown: congestion
                 .congestion_nack_backoff_cooldown
                 .max(Duration::from_millis(1)),
             next_nack_loss_backoff: now,
@@ -1488,7 +1491,7 @@ mod tests {
     use crate::protocol::reliability::Reliability;
     use crate::protocol::sequence24::Sequence24;
     use crate::session::tunables::{
-        AckNackFlushProfile, AckNackPriority, BackpressureMode, SessionTunables,
+        AckNackFlushProfile, AckNackPriority, BackpressureMode, CongestionProfile, SessionTunables,
     };
 
     fn transition_to_connected(session: &mut Session) {
@@ -1765,6 +1768,7 @@ mod tests {
     #[test]
     fn nack_backoff_cooldown_prevents_repeated_window_cuts() {
         let tunables = SessionTunables {
+            congestion_profile: CongestionProfile::Custom,
             initial_congestion_window: 64.0,
             min_congestion_window: 8.0,
             max_congestion_window: 512.0,
@@ -1837,6 +1841,7 @@ mod tests {
     #[test]
     fn timeout_backoff_is_stronger_than_nack_backoff() {
         let tunables = SessionTunables {
+            congestion_profile: CongestionProfile::Custom,
             initial_congestion_window: 100.0,
             min_congestion_window: 8.0,
             max_congestion_window: 512.0,
