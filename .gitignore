@@ -8,6 +8,9 @@
 # Fuzzing (ignore entire fuzz workspace)
 /fuzz/
 
+# Local docs / notes
+/docs/
+
 # Runtime dumps / profiles
 *.profraw
 *.profdata

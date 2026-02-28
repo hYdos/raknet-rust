@@ -36,8 +36,8 @@ impl SplitAssembler {
         Self {
             entries: HashMap::new(),
             ttl: effective_ttl,
-            max_parts,
-            max_concurrent,
+            max_parts: max_parts.max(1),
+            max_concurrent: max_concurrent.max(1),
         }
     }
 
@@ -45,6 +45,9 @@ impl SplitAssembler {
         if !frame.header.is_split {
             return Ok(Some(frame));
         }
+
+        // Opportunistically reclaim stale compounds before applying capacity checks.
+        let _ = self.prune(now);
 
         let split = frame.split.as_ref().ok_or(DecodeError::MissingSplitInfo)?;
         if split.part_count == 0 {
@@ -56,6 +59,8 @@ impl SplitAssembler {
         if split.part_index >= split.part_count {
             return Err(DecodeError::SplitIndexOutOfRange);
         }
+        let part_count =
+            usize::try_from(split.part_count).map_err(|_| DecodeError::SplitTooLarge)?;
 
         if self.entries.len() >= self.max_concurrent && !self.entries.contains_key(&split.part_id) {
             return Err(DecodeError::SplitBufferFull);
@@ -72,14 +77,14 @@ impl SplitAssembler {
                 ordering_channel: frame.ordering_channel,
                 part_count: split.part_count,
                 received: 0,
-                parts: vec![None; split.part_count as usize],
+                parts: vec![None; part_count],
                 last_update: now,
             });
 
         if entry.part_count != split.part_count {
             return Err(DecodeError::SplitCountMismatch);
         }
-        if entry.parts.len() != split.part_count as usize {
+        if entry.parts.len() != part_count {
             return Err(DecodeError::SplitCountMismatch);
         }
 
@@ -137,5 +142,169 @@ impl SplitAssembler {
             }
         });
         dropped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use bytes::Bytes;
+
+    use super::SplitAssembler;
+    use crate::error::DecodeError;
+    use crate::protocol::frame::{Frame, SplitInfo};
+    use crate::protocol::frame_header::FrameHeader;
+    use crate::protocol::reliability::Reliability;
+
+    fn split_frame(
+        part_id: u16,
+        part_count: u32,
+        part_index: u32,
+        payload: &'static [u8],
+    ) -> Frame {
+        Frame {
+            header: FrameHeader::new(Reliability::ReliableOrdered, true, false),
+            bit_length: (payload.len() as u16) << 3,
+            reliable_index: None,
+            sequence_index: None,
+            ordering_index: None,
+            ordering_channel: None,
+            split: Some(SplitInfo {
+                part_count,
+                part_id,
+                part_index,
+            }),
+            payload: Bytes::from_static(payload),
+        }
+    }
+
+    #[test]
+    fn add_rejects_split_part_count_over_limit() {
+        let mut assembler = SplitAssembler::new(Duration::from_secs(5), 2, 8);
+        let now = Instant::now();
+        let frame = split_frame(1, 3, 0, b"a");
+        let err = assembler
+            .add(frame, now)
+            .expect_err("part_count above max_parts must be rejected");
+        assert!(matches!(err, DecodeError::SplitTooLarge));
+    }
+
+    #[test]
+    fn add_enforces_max_concurrent_compounds_but_allows_existing_id() {
+        let mut assembler = SplitAssembler::new(Duration::from_secs(5), 4, 2);
+        let now = Instant::now();
+
+        assert!(matches!(
+            assembler.add(split_frame(1, 2, 0, b"a"), now),
+            Ok(None)
+        ));
+        assert!(matches!(
+            assembler.add(split_frame(2, 2, 0, b"b"), now),
+            Ok(None)
+        ));
+
+        let err = assembler
+            .add(split_frame(3, 2, 0, b"c"), now)
+            .expect_err("new split compound must fail when buffer is full");
+        assert!(matches!(err, DecodeError::SplitBufferFull));
+
+        let assembled = assembler
+            .add(split_frame(1, 2, 1, b"d"), now)
+            .expect("existing compound should still accept remaining part");
+        assert!(
+            assembled.is_some(),
+            "compound with existing part_id should complete"
+        );
+    }
+
+    #[test]
+    fn add_rejects_split_count_mismatch_for_same_part_id() {
+        let mut assembler = SplitAssembler::new(Duration::from_secs(5), 8, 8);
+        let now = Instant::now();
+
+        assert!(matches!(
+            assembler.add(split_frame(9, 2, 0, b"a"), now),
+            Ok(None)
+        ));
+        let err = assembler
+            .add(split_frame(9, 3, 1, b"b"), now)
+            .expect_err("same part_id with different part_count must be rejected");
+        assert!(matches!(err, DecodeError::SplitCountMismatch));
+    }
+
+    #[test]
+    fn add_assembles_payload_and_ignores_duplicate_part() {
+        let mut assembler = SplitAssembler::new(Duration::from_secs(5), 4, 8);
+        let now = Instant::now();
+
+        assert!(matches!(
+            assembler.add(split_frame(5, 2, 0, b"hello "), now),
+            Ok(None)
+        ));
+        assert!(matches!(
+            assembler.add(split_frame(5, 2, 0, b"duplicate"), now),
+            Ok(None)
+        ));
+
+        let assembled = assembler
+            .add(split_frame(5, 2, 1, b"world"), now)
+            .expect("final split part should be accepted")
+            .expect("compound should assemble");
+        assert_eq!(assembled.payload.as_ref(), b"hello world");
+        assert!(!assembled.header.is_split);
+        assert!(
+            assembler.entries.is_empty(),
+            "assembled compound must be removed"
+        );
+    }
+
+    #[test]
+    fn prune_drops_only_expired_compounds() {
+        let mut assembler = SplitAssembler::new(Duration::from_millis(30), 8, 8);
+        let start = Instant::now();
+
+        assert!(matches!(
+            assembler.add(split_frame(11, 2, 0, b"a"), start),
+            Ok(None)
+        ));
+        assert!(matches!(
+            assembler.add(
+                split_frame(12, 2, 0, b"b"),
+                start + Duration::from_millis(20)
+            ),
+            Ok(None)
+        ));
+
+        let dropped_first = assembler.prune(start + Duration::from_millis(35));
+        assert_eq!(dropped_first, 1, "only oldest compound should expire first");
+        assert_eq!(assembler.entries.len(), 1);
+
+        let dropped_second = assembler.prune(start + Duration::from_millis(60));
+        assert_eq!(
+            dropped_second, 1,
+            "remaining compound should expire on later prune"
+        );
+        assert!(assembler.entries.is_empty());
+    }
+
+    #[test]
+    fn add_prunes_expired_compounds_before_capacity_check() {
+        let mut assembler = SplitAssembler::new(Duration::from_millis(20), 4, 1);
+        let start = Instant::now();
+
+        assert!(matches!(
+            assembler.add(split_frame(30, 2, 0, b"x"), start),
+            Ok(None)
+        ));
+
+        let result = assembler.add(
+            split_frame(31, 2, 0, b"y"),
+            start + Duration::from_millis(25),
+        );
+        assert!(
+            result.is_ok(),
+            "expired compound should be pruned before checking max_concurrent"
+        );
     }
 }

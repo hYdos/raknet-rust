@@ -1488,6 +1488,8 @@ mod tests {
     use super::{QueuePayloadResult, RakPriority, Session, SessionState};
     use crate::protocol::ack::{AckNackPayload, SequenceRange};
     use crate::protocol::datagram::DatagramPayload;
+    use crate::protocol::frame::{Frame, SplitInfo};
+    use crate::protocol::frame_header::FrameHeader;
     use crate::protocol::reliability::Reliability;
     use crate::protocol::sequence24::Sequence24;
     use crate::session::tunables::{
@@ -2009,6 +2011,49 @@ mod tests {
         }
         let second_progress = session.process_incoming_receipts(now + Duration::from_millis(120));
         assert_eq!(second_progress.acked_receipt_ids, vec![42]);
+    }
+
+    #[test]
+    fn prune_split_state_increments_split_ttl_drop_metrics() {
+        let tunables = SessionTunables {
+            split_ttl: Duration::from_millis(20),
+            max_split_parts: 8,
+            max_concurrent_splits: 8,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+        let now = Instant::now();
+
+        let split_frame = Frame {
+            header: FrameHeader::new(Reliability::ReliableOrdered, true, false),
+            bit_length: 8,
+            reliable_index: None,
+            sequence_index: None,
+            ordering_index: None,
+            ordering_channel: None,
+            split: Some(SplitInfo {
+                part_count: 2,
+                part_id: 77,
+                part_index: 0,
+            }),
+            payload: Bytes::from_static(b"a"),
+        };
+
+        assert!(matches!(
+            session.split_assembler.add(split_frame, now),
+            Ok(None)
+        ));
+        assert_eq!(
+            session.prune_split_state(now + Duration::from_millis(10)),
+            0
+        );
+        assert_eq!(session.metrics_snapshot().split_ttl_drops, 0);
+
+        assert_eq!(
+            session.prune_split_state(now + Duration::from_millis(30)),
+            1
+        );
+        assert_eq!(session.metrics_snapshot().split_ttl_drops, 1);
     }
 
     #[test]
