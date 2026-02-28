@@ -775,6 +775,14 @@ impl TransportServer {
             }
         }
 
+        if self
+            .sessions
+            .get(&addr)
+            .is_some_and(|session| session.state() == SessionState::Connected)
+        {
+            self.pending_handshakes.remove(&addr);
+        }
+
         let frame_count = frames.len();
         Ok(TransportEvent::ConnectedFrames {
             addr,
@@ -1225,13 +1233,9 @@ impl TransportServer {
                     return Ok(None);
                 }
 
-                if self
-                    .pending_handshakes
-                    .get(&addr)
-                    .is_some_and(|pending| {
-                        pending.stage == PendingHandshakeStage::AwaitingConnectionRequest
-                    })
-                {
+                if self.pending_handshakes.get(&addr).is_some_and(|pending| {
+                    pending.stage == PendingHandshakeStage::AwaitingConnectionRequest
+                }) {
                     self.handshake_already_connected_rejects =
                         self.handshake_already_connected_rejects.saturating_add(1);
                     self.send_already_connected(addr).await?;
@@ -2125,8 +2129,8 @@ mod tests {
 
     use super::{
         ConnectedFrameDelivery, ControlAction, HandshakeViolation, PendingHandshake,
-        RemoteDisconnectReason, TransportEvent, TransportRateLimitConfig, TransportServer,
-        build_internal_addrs, is_connected_control_id, is_offline_packet_id,
+        PendingHandshakeStage, RemoteDisconnectReason, TransportEvent, TransportRateLimitConfig,
+        TransportServer, build_internal_addrs, is_connected_control_id, is_offline_packet_id,
         primary_protocol_version, supports_protocol,
     };
     use crate::error::DecodeError;
@@ -2438,6 +2442,7 @@ mod tests {
             PendingHandshake {
                 mtu: 1492,
                 cookie: None,
+                stage: PendingHandshakeStage::AwaitingRequest2,
                 expires_at: now - Duration::from_millis(1),
             },
         );
@@ -2455,7 +2460,7 @@ mod tests {
     #[test]
     fn reply2_connect_timeout_updates_metrics_and_closes_session() {
         let config = TransportConfig {
-            handshake_timeout: Duration::from_secs(1),
+            handshake_reply2_connect_timeout: Duration::from_secs(1),
             ..TransportConfig::default()
         };
         let mut server = build_test_server(config);
@@ -2476,6 +2481,15 @@ mod tests {
         ));
         session.touch_activity(now - Duration::from_secs(2));
         server.sessions.insert(addr, session);
+        server.pending_handshakes.insert(
+            addr,
+            PendingHandshake {
+                mtu: 1492,
+                cookie: None,
+                stage: PendingHandshakeStage::AwaitingConnectionRequest,
+                expires_at: now - Duration::from_millis(1),
+            },
+        );
 
         server.prune_pending_handshakes(now);
 
@@ -3010,8 +3024,8 @@ mod tests {
             assert!(event.is_none(), "successful request2 should not emit event");
 
             assert!(
-                !server.pending_handshakes.contains_key(&addr),
-                "accepted request2 must clear pending handshake"
+                server.pending_handshakes.contains_key(&addr),
+                "accepted request2 must keep pending handshake until connected"
             );
             let session = server
                 .sessions
@@ -3021,6 +3035,79 @@ mod tests {
 
             let metrics = server.metrics_snapshot();
             assert_eq!(metrics.request2_server_addr_mismatch_drops, 0);
+        });
+    }
+
+    #[test]
+    fn open_connection_request2_retry_resends_reply2_without_missing_req1_penalty() {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime must build");
+        rt.block_on(async {
+            let mut config = TransportConfig::default();
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind should succeed");
+            config.bind_addr = socket.local_addr().expect("local addr should be available");
+            let mut server =
+                TransportServer::with_socket(config, socket).expect("server should build");
+            let addr = "127.0.0.1:20314"
+                .parse::<SocketAddr>()
+                .expect("valid socket addr");
+
+            let request1 = OfflinePacket::OpenConnectionRequest1(OpenConnectionRequest1 {
+                protocol_version: RAKNET_PROTOCOL_VERSION,
+                mtu: 1200,
+                magic: DEFAULT_UNCONNECTED_MAGIC,
+            });
+            server
+                .handle_offline_packet(addr, &request1, Instant::now())
+                .await
+                .expect("request1 handling should succeed");
+
+            let cookie = server.generate_cookie(addr);
+            let request2 = OfflinePacket::OpenConnectionRequest2(OpenConnectionRequest2 {
+                server_addr: server.local_addr().expect("local addr should be available"),
+                mtu: 1200,
+                client_guid: 0x1111_2222_3333_4444,
+                cookie: Some(cookie),
+                client_proof: true,
+                parse_path: Request2ParsePath::StrictWithCookie,
+                magic: DEFAULT_UNCONNECTED_MAGIC,
+            });
+
+            let first = server
+                .handle_offline_packet(addr, &request2, Instant::now())
+                .await
+                .expect("first request2 should succeed");
+            assert!(first.is_none());
+
+            let second = server
+                .handle_offline_packet(addr, &request2, Instant::now() + Duration::from_millis(10))
+                .await
+                .expect("retry request2 should succeed");
+            assert!(second.is_none());
+
+            let pending = server
+                .pending_handshakes
+                .get(&addr)
+                .copied()
+                .expect("pending handshake should remain until connected");
+            assert_eq!(
+                pending.stage,
+                PendingHandshakeStage::AwaitingConnectionRequest
+            );
+
+            let session = server
+                .sessions
+                .get(&addr)
+                .expect("session should exist during post-reply2 handshake stage");
+            assert_eq!(session.state(), SessionState::Reply2Sent);
+
+            let metrics = server.metrics_snapshot();
+            assert_eq!(metrics.handshake_missing_req1_drops, 0);
+            assert_eq!(metrics.handshake_stage_cancel_drops, 0);
         });
     }
 
