@@ -162,6 +162,7 @@ pub struct TransportMetricsSnapshot {
     pub rate_exception_addresses: usize,
     pub cookie_rotations: u64,
     pub cookie_mismatch_drops: u64,
+    pub cookie_mismatch_blocks: u64,
     pub handshake_stage_cancel_drops: u64,
     pub handshake_req1_req2_timeouts: u64,
     pub handshake_reply2_connect_timeouts: u64,
@@ -203,6 +204,12 @@ struct PendingHandshake {
 struct HandshakeHeuristicState {
     window_started_at: Instant,
     score: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CookieMismatchGuardState {
+    window_started_at: Instant,
+    mismatches: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,6 +264,7 @@ pub struct TransportServer {
     keepalive_pings_sent: u64,
     cookie_rotations: u64,
     cookie_mismatch_drops: u64,
+    cookie_mismatch_blocks: u64,
     handshake_stage_cancel_drops: u64,
     handshake_req1_req2_timeouts: u64,
     handshake_reply2_connect_timeouts: u64,
@@ -266,6 +274,7 @@ pub struct TransportServer {
     handshake_ip_recently_connected_rejects: u64,
     request2_server_addr_mismatch_drops: u64,
     handshake_heuristics: HashMap<IpAddr, HandshakeHeuristicState>,
+    cookie_mismatch_guard_states: HashMap<IpAddr, CookieMismatchGuardState>,
     ip_recently_connected_until: HashMap<IpAddr, Instant>,
     request2_legacy_parse_hits: u64,
     request2_legacy_drops: u64,
@@ -444,6 +453,7 @@ impl TransportServer {
             keepalive_pings_sent: 0,
             cookie_rotations: 0,
             cookie_mismatch_drops: 0,
+            cookie_mismatch_blocks: 0,
             handshake_stage_cancel_drops: 0,
             handshake_req1_req2_timeouts: 0,
             handshake_reply2_connect_timeouts: 0,
@@ -453,6 +463,7 @@ impl TransportServer {
             handshake_ip_recently_connected_rejects: 0,
             request2_server_addr_mismatch_drops: 0,
             handshake_heuristics: HashMap::new(),
+            cookie_mismatch_guard_states: HashMap::new(),
             ip_recently_connected_until: HashMap::new(),
             request2_legacy_parse_hits: 0,
             request2_legacy_drops: 0,
@@ -589,6 +600,7 @@ impl TransportServer {
         };
 
         self.prune_pending_handshakes(now);
+        self.prune_cookie_mismatch_guard_states(now);
         self.prune_ip_recently_connected(now);
         self.prune_idle_sessions(now, Some(addr));
         self.rate_limiter.tick(now);
@@ -890,6 +902,7 @@ impl TransportServer {
             keepalive_pings_sent: self.keepalive_pings_sent,
             cookie_rotations: self.cookie_rotations,
             cookie_mismatch_drops: self.cookie_mismatch_drops,
+            cookie_mismatch_blocks: self.cookie_mismatch_blocks,
             handshake_stage_cancel_drops: self.handshake_stage_cancel_drops,
             handshake_req1_req2_timeouts: self.handshake_req1_req2_timeouts,
             handshake_reply2_connect_timeouts: self.handshake_reply2_connect_timeouts,
@@ -1083,6 +1096,7 @@ impl TransportServer {
     ) -> io::Result<usize> {
         let now = Instant::now();
         self.prune_pending_handshakes(now);
+        self.prune_cookie_mismatch_guard_states(now);
         self.prune_ip_recently_connected(now);
         self.prune_idle_sessions(now, None);
         self.queue_keepalive_pings(now);
@@ -1416,16 +1430,18 @@ impl TransportServer {
                     self.cookie_mismatch_drops = self.cookie_mismatch_drops.saturating_add(1);
                     self.handshake_stage_cancel_drops =
                         self.handshake_stage_cancel_drops.saturating_add(1);
-                    let newly_blocked = self.record_handshake_violation(
+                    let blocked_by_guard = self.record_cookie_mismatch(addr.ip(), now);
+                    let blocked_by_heuristics = self.record_handshake_violation(
                         addr,
                         HandshakeViolation::CookieMismatch,
                         now,
                     );
-                    if newly_blocked {
+                    if blocked_by_guard || blocked_by_heuristics {
                         self.send_connection_banned(addr).await?;
                     }
                     return Ok(None);
                 }
+                self.clear_cookie_mismatch_state(addr.ip());
 
                 if pending.stage == PendingHandshakeStage::AwaitingConnectionRequest {
                     let retry_mtu = self.negotiate_mtu(req2.mtu.min(pending.mtu));
@@ -1674,6 +1690,62 @@ impl TransportServer {
         }
 
         self.prune_handshake_heuristic_states(now);
+    }
+
+    fn clear_cookie_mismatch_state(&mut self, ip: IpAddr) {
+        self.cookie_mismatch_guard_states.remove(&ip);
+    }
+
+    fn record_cookie_mismatch(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let guard = self.config.cookie_mismatch_guard;
+        if !guard.enabled
+            || guard.event_window.is_zero()
+            || guard.block_duration.is_zero()
+            || guard.mismatch_threshold == 0
+        {
+            return false;
+        }
+
+        let state =
+            self.cookie_mismatch_guard_states
+                .entry(ip)
+                .or_insert(CookieMismatchGuardState {
+                    window_started_at: now,
+                    mismatches: 0,
+                });
+
+        if now.saturating_duration_since(state.window_started_at) > guard.event_window {
+            state.window_started_at = now;
+            state.mismatches = 0;
+        }
+
+        state.mismatches = state.mismatches.saturating_add(1);
+        if state.mismatches < guard.mismatch_threshold {
+            return false;
+        }
+
+        state.window_started_at = now;
+        state.mismatches = 0;
+
+        let newly_blocked = self
+            .rate_limiter
+            .block_address_for(ip, now, guard.block_duration);
+        if newly_blocked {
+            self.cookie_mismatch_blocks = self.cookie_mismatch_blocks.saturating_add(1);
+        }
+        newly_blocked
+    }
+
+    fn prune_cookie_mismatch_guard_states(&mut self, now: Instant) {
+        let guard = self.config.cookie_mismatch_guard;
+        if !guard.enabled || guard.event_window.is_zero() {
+            self.cookie_mismatch_guard_states.clear();
+            return;
+        }
+
+        self.cookie_mismatch_guard_states.retain(|_, state| {
+            now.saturating_duration_since(state.window_started_at) <= guard.event_window
+        });
     }
 
     fn record_handshake_violation(
@@ -2149,7 +2221,8 @@ mod tests {
     use crate::session::tunables::SessionTunables;
     use crate::session::{QueuePayloadResult, RakPriority, Session, SessionState};
     use crate::transport::config::{
-        HandshakeHeuristicsConfig, Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
+        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, Request2ServerAddrPolicy,
+        TransportConfig, TransportSocketTuning,
     };
 
     fn build_test_server(mut config: TransportConfig) -> TransportServer {
@@ -2421,6 +2494,93 @@ mod tests {
         let cookie = server.generate_cookie(addr_a);
         assert!(server.verify_cookie(addr_a, Some(cookie)));
         assert!(!server.verify_cookie(addr_b, Some(cookie)));
+    }
+
+    #[test]
+    fn cookie_mismatch_guard_blocks_after_threshold() {
+        let config = TransportConfig {
+            cookie_mismatch_guard: CookieMismatchGuardConfig {
+                enabled: true,
+                event_window: Duration::from_secs(30),
+                mismatch_threshold: 2,
+                block_duration: Duration::from_secs(10),
+            },
+            ..TransportConfig::default()
+        };
+        let mut server = build_test_server(config);
+        let ip: IpAddr = "203.0.113.9".parse().expect("valid ip");
+        let now = Instant::now();
+
+        assert!(!server.record_cookie_mismatch(ip, now));
+        assert!(server.record_cookie_mismatch(ip, now + Duration::from_millis(1)));
+
+        let metrics = server.metrics_snapshot();
+        assert_eq!(metrics.cookie_mismatch_blocks, 1);
+        assert_eq!(metrics.rate_blocked_addresses, 1);
+    }
+
+    #[test]
+    fn request2_cookie_mismatch_updates_metrics_and_uses_guard_blocking() {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime must build");
+        rt.block_on(async {
+            let mut config = TransportConfig {
+                send_cookie: true,
+                handshake_heuristics: HandshakeHeuristicsConfig {
+                    enabled: false,
+                    ..HandshakeHeuristicsConfig::default()
+                },
+                cookie_mismatch_guard: CookieMismatchGuardConfig {
+                    enabled: true,
+                    event_window: Duration::from_secs(30),
+                    mismatch_threshold: 1,
+                    block_duration: Duration::from_secs(10),
+                },
+                ..TransportConfig::default()
+            };
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind should succeed");
+            config.bind_addr = socket.local_addr().expect("local addr should be available");
+            let mut server =
+                TransportServer::with_socket(config, socket).expect("server should build");
+            let addr = "127.0.0.1:20320"
+                .parse::<SocketAddr>()
+                .expect("valid socket addr");
+
+            let request1 = OfflinePacket::OpenConnectionRequest1(OpenConnectionRequest1 {
+                protocol_version: RAKNET_PROTOCOL_VERSION,
+                mtu: 1200,
+                magic: DEFAULT_UNCONNECTED_MAGIC,
+            });
+            server
+                .handle_offline_packet(addr, &request1, Instant::now())
+                .await
+                .expect("request1 handling should succeed");
+
+            let wrong_cookie = server.generate_cookie(addr).wrapping_add(1);
+            let request2 = OfflinePacket::OpenConnectionRequest2(OpenConnectionRequest2 {
+                server_addr: server.local_addr().expect("local addr should be available"),
+                mtu: 1200,
+                client_guid: 0xABCD_ABCD_ABCD_ABCD,
+                cookie: Some(wrong_cookie),
+                client_proof: true,
+                parse_path: Request2ParsePath::StrictWithCookie,
+                magic: DEFAULT_UNCONNECTED_MAGIC,
+            });
+            let result = server
+                .handle_offline_packet(addr, &request2, Instant::now())
+                .await
+                .expect("request2 handling should succeed");
+            assert!(result.is_none());
+
+            let metrics = server.metrics_snapshot();
+            assert_eq!(metrics.cookie_mismatch_drops, 1);
+            assert_eq!(metrics.cookie_mismatch_blocks, 1);
+            assert_eq!(metrics.rate_blocked_addresses, 1);
+        });
     }
 
     #[test]

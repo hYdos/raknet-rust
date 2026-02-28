@@ -80,6 +80,55 @@ impl HandshakeHeuristicsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CookieMismatchGuardConfig {
+    pub enabled: bool,
+    pub event_window: Duration,
+    pub mismatch_threshold: u32,
+    pub block_duration: Duration,
+}
+
+impl Default for CookieMismatchGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            event_window: Duration::from_secs(20),
+            mismatch_threshold: 3,
+            block_duration: Duration::from_secs(30),
+        }
+    }
+}
+
+impl CookieMismatchGuardConfig {
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.event_window.is_zero() {
+            return Err(ConfigValidationError::new(
+                "CookieMismatchGuardConfig",
+                "event_window",
+                "must be > 0 when enabled",
+            ));
+        }
+        if self.mismatch_threshold == 0 {
+            return Err(ConfigValidationError::new(
+                "CookieMismatchGuardConfig",
+                "mismatch_threshold",
+                "must be >= 1 when enabled",
+            ));
+        }
+        if self.block_duration.is_zero() {
+            return Err(ConfigValidationError::new(
+                "CookieMismatchGuardConfig",
+                "block_duration",
+                "must be > 0 when enabled",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportSocketTuning {
     pub recv_buffer_size: Option<usize>,
@@ -181,6 +230,7 @@ pub struct TransportConfig {
     pub ip_recently_connected_window: Duration,
     pub request2_server_addr_policy: Request2ServerAddrPolicy,
     pub cookie_rotation_interval: Duration,
+    pub cookie_mismatch_guard: CookieMismatchGuardConfig,
     pub allow_legacy_request2_fallback: bool,
     pub reject_ambiguous_request2: bool,
     pub per_ip_packet_limit: usize,
@@ -217,6 +267,7 @@ impl Default for TransportConfig {
             ip_recently_connected_window: Duration::ZERO,
             request2_server_addr_policy: Request2ServerAddrPolicy::PortOnly,
             cookie_rotation_interval: Duration::from_secs(120),
+            cookie_mismatch_guard: CookieMismatchGuardConfig::default(),
             allow_legacy_request2_fallback: true,
             reject_ambiguous_request2: false,
             per_ip_packet_limit: 120,
@@ -366,6 +417,7 @@ impl TransportConfig {
         }
         self.socket_tuning.validate()?;
         self.handshake_heuristics.validate()?;
+        self.cookie_mismatch_guard.validate()?;
         self.session_tunables.validate()?;
         Ok(())
     }
@@ -390,7 +442,8 @@ impl TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        HandshakeHeuristicsConfig, Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
+        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, Request2ServerAddrPolicy,
+        TransportConfig, TransportSocketTuning,
     };
     use crate::handshake::MAX_UNCONNECTED_PONG_MOTD_BYTES;
     use crate::protocol::constants::DEFAULT_UNCONNECTED_MAGIC;
@@ -449,6 +502,33 @@ mod tests {
         heuristics
             .validate()
             .expect("disabled heuristics should allow zero fields");
+    }
+
+    #[test]
+    fn cookie_mismatch_guard_validate_rejects_zero_threshold_when_enabled() {
+        let guard = CookieMismatchGuardConfig {
+            enabled: true,
+            mismatch_threshold: 0,
+            ..CookieMismatchGuardConfig::default()
+        };
+        let err = guard
+            .validate()
+            .expect_err("mismatch_threshold=0 must be rejected when enabled");
+        assert_eq!(err.config, "CookieMismatchGuardConfig");
+        assert_eq!(err.field, "mismatch_threshold");
+    }
+
+    #[test]
+    fn cookie_mismatch_guard_disabled_allows_zero_values() {
+        let guard = CookieMismatchGuardConfig {
+            enabled: false,
+            event_window: Duration::ZERO,
+            mismatch_threshold: 0,
+            block_duration: Duration::ZERO,
+        };
+        guard
+            .validate()
+            .expect("disabled cookie mismatch guard should allow zero fields");
     }
 
     #[test]

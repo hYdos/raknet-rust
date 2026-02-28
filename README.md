@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/Rust-2024_edition-000000?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Alpha-orange)](#)
-[![Platform](https://img.shields.io/badge/Platform-MCBE%20RakNet-2ea44f)](#)
+[![Platform](https://img.shields.io/badge/Platform-%20RakNet-2ea44f)](#)
 
 `mcbe-raknet-rs` is a RakNet library written in Rust for Minecraft Bedrock Edition.
 
