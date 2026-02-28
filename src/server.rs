@@ -3,6 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
+use tracing::{debug, info, warn};
 
 use crate::error::ConfigValidationError;
 use crate::handshake::OfflinePacket;
@@ -11,7 +12,8 @@ use crate::protocol::sequence24::Sequence24;
 use crate::session::RakPriority;
 use crate::transport::{
     RemoteDisconnectReason, ShardedRuntimeConfig, ShardedRuntimeEvent, ShardedRuntimeHandle,
-    TransportConfig, TransportEvent, TransportMetricsSnapshot, spawn_sharded_runtime,
+    ShardedSendPayload, TransportConfig, TransportEvent, TransportMetricsSnapshot,
+    spawn_sharded_runtime,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -239,11 +241,13 @@ impl RaknetServer {
         self.runtime
             .send_payload_to_shard(
                 shard_id,
-                addr,
-                payload.into(),
-                options.reliability,
-                options.channel,
-                options.priority,
+                ShardedSendPayload {
+                    addr,
+                    payload: payload.into(),
+                    reliability: options.reliability,
+                    channel: options.channel,
+                    priority: options.priority,
+                },
             )
             .await
     }
@@ -270,11 +274,13 @@ impl RaknetServer {
         self.runtime
             .send_payload_to_shard_with_receipt(
                 shard_id,
-                addr,
-                payload.into(),
-                options.reliability,
-                options.channel,
-                options.priority,
+                ShardedSendPayload {
+                    addr,
+                    payload: payload.into(),
+                    reliability: options.reliability,
+                    channel: options.channel,
+                    priority: options.priority,
+                },
                 receipt_id,
             )
             .await
@@ -282,6 +288,12 @@ impl RaknetServer {
 
     pub async fn disconnect(&mut self, peer_id: PeerId) -> io::Result<()> {
         let (addr, shard_id) = self.resolve_peer_route(peer_id)?;
+        info!(
+            peer_id = peer_id.as_u64(),
+            %addr,
+            shard_id,
+            "server disconnect requested"
+        );
 
         self.runtime
             .disconnect_peer_from_shard(shard_id, addr)
@@ -329,12 +341,24 @@ impl RaknetServer {
                                 PeerDisconnectReason::RemoteDetectLostConnection
                             }
                         };
+                        info!(
+                            peer_id = peer_id.as_u64(),
+                            %addr,
+                            ?reason,
+                            "peer disconnected"
+                        );
                         self.pending_events
                             .push_back(RaknetServerEvent::PeerDisconnected {
                                 peer_id,
                                 addr,
                                 reason,
                             });
+                    } else {
+                        debug!(
+                            %addr,
+                            ?reason,
+                            "received peer disconnect for unknown address"
+                        );
                     }
                 }
                 TransportEvent::ConnectedFrames {
@@ -345,6 +369,12 @@ impl RaknetServer {
                 } => {
                     let (peer_id, is_new) = self.ensure_peer(addr, shard_id);
                     if is_new {
+                        info!(
+                            peer_id = peer_id.as_u64(),
+                            %addr,
+                            shard_id,
+                            "peer connected"
+                        );
                         self.pending_events
                             .push_back(RaknetServerEvent::PeerConnected {
                                 peer_id,
@@ -376,19 +406,23 @@ impl RaknetServer {
                     }
                 }
                 TransportEvent::RateLimited { addr } => {
+                    warn!(%addr, "peer rate-limited");
                     self.pending_events
                         .push_back(RaknetServerEvent::PeerRateLimited { addr });
                 }
                 TransportEvent::SessionLimitReached { addr } => {
+                    warn!(%addr, "session limit reached");
                     self.pending_events
                         .push_back(RaknetServerEvent::SessionLimitReached { addr });
                 }
                 TransportEvent::ConnectedDatagramDroppedNoSession { .. } => {}
                 TransportEvent::ProxyDropped { addr } => {
+                    debug!(%addr, "proxy router dropped packet");
                     self.pending_events
                         .push_back(RaknetServerEvent::ProxyDropped { addr });
                 }
                 TransportEvent::DecodeError { addr, error } => {
+                    warn!(%addr, %error, "transport decode error");
                     self.pending_events
                         .push_back(RaknetServerEvent::DecodeError {
                             addr,
@@ -405,6 +439,13 @@ impl RaknetServer {
                 snapshot,
                 dropped_non_critical_events,
             } => {
+                if dropped_non_critical_events > 0 {
+                    debug!(
+                        shard_id,
+                        dropped_non_critical_events,
+                        "non-critical runtime events were dropped before metrics emit"
+                    );
+                }
                 self.pending_events.push_back(RaknetServerEvent::Metrics {
                     shard_id,
                     snapshot,
@@ -412,10 +453,12 @@ impl RaknetServer {
                 });
             }
             ShardedRuntimeEvent::WorkerError { shard_id, message } => {
+                warn!(shard_id, %message, "runtime worker error");
                 self.pending_events
                     .push_back(RaknetServerEvent::WorkerError { shard_id, message });
             }
             ShardedRuntimeEvent::WorkerStopped { shard_id } => {
+                warn!(shard_id, "runtime worker stopped");
                 let mut disconnected = Vec::new();
                 for (addr, binding) in &self.peers_by_addr {
                     if binding.shard_id == shard_id {
@@ -424,6 +467,12 @@ impl RaknetServer {
                 }
                 for (addr, peer_id) in disconnected {
                     self.remove_peer(addr);
+                    info!(
+                        peer_id = peer_id.as_u64(),
+                        %addr,
+                        shard_id,
+                        "peer disconnected because worker stopped"
+                    );
                     self.pending_events
                         .push_back(RaknetServerEvent::PeerDisconnected {
                             peer_id,

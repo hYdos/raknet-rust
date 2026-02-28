@@ -2,8 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use super::config::ProcessingBudgetConfig;
+
 const MIN_RATE_WINDOW: Duration = Duration::from_millis(1);
 const MIN_BLOCK_DURATION: Duration = Duration::from_millis(1);
+const MIN_PROCESSING_IDLE_TTL: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
@@ -21,6 +24,13 @@ pub enum RateLimitDecision {
         newly_blocked: bool,
         reason: BlockReason,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingBudgetDecision {
+    Allow,
+    IpExhausted,
+    GlobalExhausted,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +61,144 @@ struct RateLimiterMetrics {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct ProcessingBudgetMetrics {
+    drops_total: u64,
+    drops_ip_exhausted: u64,
+    drops_global_exhausted: u64,
+    consumed_units_total: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessingTokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl ProcessingTokenBucket {
+    fn with_full_tokens(now: Instant, burst: u32) -> Self {
+        Self {
+            tokens: burst as f64,
+            last_refill: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant, refill_per_sec: u32, burst: u32) {
+        if now <= self.last_refill {
+            return;
+        }
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.last_refill = now;
+        let refill = elapsed * (refill_per_sec as f64);
+        self.tokens = (self.tokens + refill).clamp(0.0, burst as f64);
+    }
+
+    fn can_consume(&self, cost: u32) -> bool {
+        self.tokens >= cost as f64
+    }
+
+    fn consume(&mut self, cost: u32) {
+        self.tokens = (self.tokens - cost as f64).max(0.0);
+    }
+}
+
+struct ProcessingBudgetState {
+    config: ProcessingBudgetConfig,
+    global_bucket: ProcessingTokenBucket,
+    per_ip_buckets: HashMap<IpAddr, ProcessingTokenBucket>,
+    metrics: ProcessingBudgetMetrics,
+}
+
+impl ProcessingBudgetState {
+    fn new(config: ProcessingBudgetConfig, now: Instant) -> Self {
+        let config = normalize_processing_budget_config(config);
+        Self {
+            global_bucket: ProcessingTokenBucket::with_full_tokens(now, config.global_burst_units),
+            config,
+            per_ip_buckets: HashMap::new(),
+            metrics: ProcessingBudgetMetrics::default(),
+        }
+    }
+
+    fn set_config(&mut self, config: ProcessingBudgetConfig, now: Instant) {
+        let config = normalize_processing_budget_config(config);
+        self.config = config;
+        self.global_bucket =
+            ProcessingTokenBucket::with_full_tokens(now, self.config.global_burst_units);
+        self.per_ip_buckets.clear();
+    }
+
+    fn tick(&mut self, now: Instant) {
+        if !self.config.enabled {
+            self.per_ip_buckets.clear();
+            return;
+        }
+
+        self.per_ip_buckets.retain(|_, bucket| {
+            now.saturating_duration_since(bucket.last_refill) <= self.config.bucket_idle_ttl
+        });
+    }
+
+    fn consume(&mut self, ip: IpAddr, cost_units: usize, now: Instant) -> ProcessingBudgetDecision {
+        if !self.config.enabled {
+            return ProcessingBudgetDecision::Allow;
+        }
+
+        let max_cost = self
+            .config
+            .per_ip_burst_units
+            .min(self.config.global_burst_units)
+            .max(1);
+        let cost_units = cost_units.max(1).min(max_cost as usize) as u32;
+
+        self.global_bucket.refill(
+            now,
+            self.config.global_refill_units_per_sec,
+            self.config.global_burst_units,
+        );
+        if !self.global_bucket.can_consume(cost_units) {
+            self.metrics.drops_total = self.metrics.drops_total.saturating_add(1);
+            self.metrics.drops_global_exhausted =
+                self.metrics.drops_global_exhausted.saturating_add(1);
+            return ProcessingBudgetDecision::GlobalExhausted;
+        }
+
+        let bucket = self.per_ip_buckets.entry(ip).or_insert_with(|| {
+            ProcessingTokenBucket::with_full_tokens(now, self.config.per_ip_burst_units)
+        });
+        bucket.refill(
+            now,
+            self.config.per_ip_refill_units_per_sec,
+            self.config.per_ip_burst_units,
+        );
+        if !bucket.can_consume(cost_units) {
+            self.metrics.drops_total = self.metrics.drops_total.saturating_add(1);
+            self.metrics.drops_ip_exhausted = self.metrics.drops_ip_exhausted.saturating_add(1);
+            return ProcessingBudgetDecision::IpExhausted;
+        }
+
+        self.global_bucket.consume(cost_units);
+        bucket.consume(cost_units);
+        self.metrics.consumed_units_total = self
+            .metrics
+            .consumed_units_total
+            .saturating_add(cost_units as u64);
+        ProcessingBudgetDecision::Allow
+    }
+
+    fn metrics_snapshot(&self) -> ProcessingBudgetMetricsSnapshot {
+        ProcessingBudgetMetricsSnapshot {
+            drops_total: self.metrics.drops_total,
+            drops_ip_exhausted: self.metrics.drops_ip_exhausted,
+            drops_global_exhausted: self.metrics.drops_global_exhausted,
+            consumed_units_total: self.metrics.consumed_units_total,
+            active_ip_buckets: self.per_ip_buckets.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RateLimiterMetricsSnapshot {
     pub global_limit_hits: u64,
     pub ip_block_hits: u64,
@@ -66,6 +214,15 @@ pub struct RateLimiterMetricsSnapshot {
     pub addresses_unblocked: u64,
     pub blocked_addresses: usize,
     pub exception_addresses: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessingBudgetMetricsSnapshot {
+    pub drops_total: u64,
+    pub drops_ip_exhausted: u64,
+    pub drops_global_exhausted: u64,
+    pub consumed_units_total: u64,
+    pub active_ip_buckets: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +244,7 @@ pub struct RateLimiter {
     blocked: HashMap<IpAddr, BlockState>,
     exceptions: HashSet<IpAddr>,
     metrics: RateLimiterMetrics,
+    processing_budget: ProcessingBudgetState,
 }
 
 impl RateLimiter {
@@ -96,10 +254,27 @@ impl RateLimiter {
         window: Duration,
         block_duration: Duration,
     ) -> Self {
+        Self::new_with_processing_budget(
+            per_ip_limit,
+            global_limit,
+            window,
+            block_duration,
+            ProcessingBudgetConfig::default(),
+        )
+    }
+
+    pub fn new_with_processing_budget(
+        per_ip_limit: usize,
+        global_limit: usize,
+        window: Duration,
+        block_duration: Duration,
+        processing_budget_config: ProcessingBudgetConfig,
+    ) -> Self {
         let (per_ip_limit, global_limit, window, block_duration) =
             normalize_limits(per_ip_limit, global_limit, window, block_duration);
+        let now = Instant::now();
         Self {
-            window_start: Instant::now(),
+            window_start: now,
             window_count: 0,
             per_ip_limit,
             global_limit,
@@ -109,12 +284,14 @@ impl RateLimiter {
             blocked: HashMap::new(),
             exceptions: HashSet::new(),
             metrics: RateLimiterMetrics::default(),
+            processing_budget: ProcessingBudgetState::new(processing_budget_config, now),
         }
     }
 
     pub fn tick(&mut self, now: Instant) {
         self.rotate_window_if_needed(now);
         self.prune_expired_blocks(now);
+        self.processing_budget.tick(now);
     }
 
     pub fn check(&mut self, ip: IpAddr, now: Instant) -> RateLimitDecision {
@@ -166,6 +343,10 @@ impl RateLimiter {
         self.exceptions.remove(&ip);
     }
 
+    pub fn is_exception(&self, ip: IpAddr) -> bool {
+        self.exceptions.contains(&ip)
+    }
+
     pub fn set_per_ip_limit(&mut self, per_ip_limit: usize) {
         self.per_ip_limit = per_ip_limit.max(1);
         self.reset_window_state(Instant::now());
@@ -208,6 +389,28 @@ impl RateLimiter {
             window: self.window,
             block_duration: self.block_duration,
         }
+    }
+
+    pub fn processing_budget_config(&self) -> ProcessingBudgetConfig {
+        self.processing_budget.config
+    }
+
+    pub fn set_processing_budget_config(&mut self, config: ProcessingBudgetConfig) {
+        self.processing_budget.set_config(config, Instant::now());
+    }
+
+    pub fn consume_processing_budget(
+        &mut self,
+        ip: IpAddr,
+        cost_units: usize,
+        now: Instant,
+    ) -> ProcessingBudgetDecision {
+        self.tick(now);
+        self.processing_budget.consume(ip, cost_units, now)
+    }
+
+    pub fn processing_budget_metrics_snapshot(&self) -> ProcessingBudgetMetricsSnapshot {
+        self.processing_budget.metrics_snapshot()
     }
 
     pub fn block_address(&mut self, ip: IpAddr) -> bool {
@@ -398,12 +601,28 @@ fn normalize_duration(value: Duration, minimum: Duration) -> Duration {
     if value.is_zero() { minimum } else { value }
 }
 
+fn normalize_processing_budget_config(
+    mut config: ProcessingBudgetConfig,
+) -> ProcessingBudgetConfig {
+    if !config.enabled {
+        return config;
+    }
+
+    config.per_ip_refill_units_per_sec = config.per_ip_refill_units_per_sec.max(1);
+    config.per_ip_burst_units = config.per_ip_burst_units.max(1);
+    config.global_refill_units_per_sec = config.global_refill_units_per_sec.max(1);
+    config.global_burst_units = config.global_burst_units.max(1);
+    config.bucket_idle_ttl = normalize_duration(config.bucket_idle_ttl, MIN_PROCESSING_IDLE_TTL);
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
-    use super::{BlockReason, RateLimitDecision, RateLimiter};
+    use super::{BlockReason, ProcessingBudgetDecision, RateLimitDecision, RateLimiter};
+    use crate::transport::config::ProcessingBudgetConfig;
 
     #[test]
     fn per_ip_limit_transitions_to_blocked() {
@@ -679,5 +898,100 @@ mod tests {
         assert_eq!(metrics.addresses_blocked_manual, 1);
         assert_eq!(metrics.addresses_blocked_handshake_heuristic, 1);
         assert_eq!(metrics.addresses_blocked_cookie_mismatch_guard, 1);
+    }
+
+    #[test]
+    fn processing_budget_exhausts_and_refills_per_ip_tokens() {
+        let mut limiter = RateLimiter::new_with_processing_budget(
+            1000,
+            1000,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            ProcessingBudgetConfig {
+                enabled: true,
+                per_ip_refill_units_per_sec: 100,
+                per_ip_burst_units: 100,
+                global_refill_units_per_sec: 1_000,
+                global_burst_units: 1_000,
+                bucket_idle_ttl: Duration::from_secs(5),
+            },
+        );
+        let now = Instant::now();
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+
+        assert_eq!(
+            limiter.consume_processing_budget(ip, 80, now),
+            ProcessingBudgetDecision::Allow
+        );
+        assert_eq!(
+            limiter.consume_processing_budget(ip, 30, now),
+            ProcessingBudgetDecision::IpExhausted
+        );
+        assert_eq!(
+            limiter.consume_processing_budget(ip, 30, now + Duration::from_secs(1)),
+            ProcessingBudgetDecision::Allow
+        );
+    }
+
+    #[test]
+    fn processing_budget_enforces_global_bucket() {
+        let mut limiter = RateLimiter::new_with_processing_budget(
+            1000,
+            1000,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            ProcessingBudgetConfig {
+                enabled: true,
+                per_ip_refill_units_per_sec: 10_000,
+                per_ip_burst_units: 10_000,
+                global_refill_units_per_sec: 100,
+                global_burst_units: 100,
+                bucket_idle_ttl: Duration::from_secs(5),
+            },
+        );
+        let now = Instant::now();
+        let ip_a = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+
+        assert_eq!(
+            limiter.consume_processing_budget(ip_a, 80, now),
+            ProcessingBudgetDecision::Allow
+        );
+        assert_eq!(
+            limiter.consume_processing_budget(ip_b, 30, now),
+            ProcessingBudgetDecision::GlobalExhausted
+        );
+        let metrics = limiter.processing_budget_metrics_snapshot();
+        assert_eq!(metrics.drops_global_exhausted, 1);
+    }
+
+    #[test]
+    fn processing_budget_bypasses_exception_addresses() {
+        let mut limiter = RateLimiter::new_with_processing_budget(
+            1000,
+            1000,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            ProcessingBudgetConfig {
+                enabled: true,
+                per_ip_refill_units_per_sec: 1,
+                per_ip_burst_units: 1,
+                global_refill_units_per_sec: 1,
+                global_burst_units: 1,
+                bucket_idle_ttl: Duration::from_secs(5),
+            },
+        );
+        let now = Instant::now();
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        limiter.add_exception(ip);
+        assert!(limiter.is_exception(ip));
+
+        // Caller is expected to bypass consumption for exception IPs.
+        let decision = if limiter.is_exception(ip) {
+            ProcessingBudgetDecision::Allow
+        } else {
+            limiter.consume_processing_budget(ip, 10_000, now)
+        };
+        assert_eq!(decision, ProcessingBudgetDecision::Allow);
     }
 }

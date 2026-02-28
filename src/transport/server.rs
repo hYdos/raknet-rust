@@ -11,6 +11,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
+use tracing::{debug, warn};
 
 use crate::error::DecodeError;
 use crate::handshake::{
@@ -23,7 +24,7 @@ use crate::protocol::connected::{
     SYSTEM_ADDRESS_COUNT,
 };
 use crate::protocol::constants::{MAXIMUM_MTU_SIZE, MINIMUM_MTU_SIZE, RAKNET_PROTOCOL_VERSION};
-use crate::protocol::datagram::Datagram;
+use crate::protocol::datagram::{Datagram, DatagramPayload};
 use crate::protocol::frame::Frame;
 use crate::protocol::reliability::Reliability;
 use crate::protocol::sequence24::Sequence24;
@@ -31,11 +32,13 @@ use crate::session::{
     QueuePayloadResult, RakPriority, ReceiptProgress, Session, SessionMetricsSnapshot, SessionState,
 };
 
-use super::config::{Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning};
+use super::config::{
+    ProcessingBudgetConfig, Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
+};
 use super::proxy::{InboundProxyRoute, OutboundProxyRoute, ProxyRouter};
 use super::rate_limiter::{
-    BlockReason, RateLimitDecision, RateLimiter, RateLimiterConfigSnapshot,
-    RateLimiterMetricsSnapshot,
+    BlockReason, ProcessingBudgetDecision, ProcessingBudgetMetricsSnapshot, RateLimitDecision,
+    RateLimiter, RateLimiterConfigSnapshot, RateLimiterMetricsSnapshot,
 };
 use super::session_pipeline::{
     PipelineFrameAction, SessionPipeline, SessionPipelineMetricsSnapshot,
@@ -127,6 +130,16 @@ pub struct TransportRateLimitConfig {
     pub block_duration: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportProcessingBudgetConfig {
+    pub enabled: bool,
+    pub per_ip_refill_units_per_sec: u32,
+    pub per_ip_burst_units: u32,
+    pub global_refill_units_per_sec: u32,
+    pub global_burst_units: u32,
+    pub bucket_idle_ttl: Duration,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TransportMetricsSnapshot {
     pub session_count: usize,
@@ -181,6 +194,11 @@ pub struct TransportMetricsSnapshot {
     pub rate_addresses_unblocked: u64,
     pub rate_blocked_addresses: usize,
     pub rate_exception_addresses: usize,
+    pub processing_budget_drops_total: u64,
+    pub processing_budget_drops_ip_exhausted_total: u64,
+    pub processing_budget_drops_global_exhausted_total: u64,
+    pub processing_budget_consumed_units_total: u64,
+    pub processing_budget_active_ip_buckets: usize,
     pub cookie_rotations: u64,
     pub cookie_mismatch_drops: u64,
     pub cookie_mismatch_blocks: u64,
@@ -449,6 +467,7 @@ impl TransportServer {
             config.rate_window,
             config.block_duration,
         );
+        rate_limiter.set_processing_budget_config(config.processing_budget);
         for ip in &config.rate_limit_exceptions {
             rate_limiter.add_exception(*ip);
         }
@@ -687,6 +706,28 @@ impl TransportServer {
             return Ok(TransportEvent::SessionLimitReached { addr });
         }
 
+        if matches!(&datagram.payload, DatagramPayload::Frames(_))
+            && !self.rate_limiter.is_exception(addr.ip())
+        {
+            let processing_cost = estimate_connected_datagram_processing_cost(len, &datagram);
+            let budget_decision =
+                self.rate_limiter
+                    .consume_processing_budget(addr.ip(), processing_cost, now);
+            match budget_decision {
+                ProcessingBudgetDecision::Allow => {}
+                ProcessingBudgetDecision::IpExhausted
+                | ProcessingBudgetDecision::GlobalExhausted => {
+                    warn!(
+                        %addr,
+                        cost_units = processing_cost,
+                        decision = ?budget_decision,
+                        "dropping connected datagram due to processing budget exhaustion"
+                    );
+                    return Ok(TransportEvent::RateLimited { addr });
+                }
+            }
+        }
+
         let server_addr = self.local_addr().unwrap_or(self.config.bind_addr);
         let now_millis = unix_timestamp_millis();
         let unhandled_queue_max_frames = self.config.unhandled_queue_max_frames;
@@ -881,6 +922,31 @@ impl TransportServer {
         }
     }
 
+    pub fn processing_budget_config(&self) -> TransportProcessingBudgetConfig {
+        let cfg = self.rate_limiter.processing_budget_config();
+        TransportProcessingBudgetConfig {
+            enabled: cfg.enabled,
+            per_ip_refill_units_per_sec: cfg.per_ip_refill_units_per_sec,
+            per_ip_burst_units: cfg.per_ip_burst_units,
+            global_refill_units_per_sec: cfg.global_refill_units_per_sec,
+            global_burst_units: cfg.global_burst_units,
+            bucket_idle_ttl: cfg.bucket_idle_ttl,
+        }
+    }
+
+    pub fn set_processing_budget_config(&mut self, config: TransportProcessingBudgetConfig) {
+        let raw = ProcessingBudgetConfig {
+            enabled: config.enabled,
+            per_ip_refill_units_per_sec: config.per_ip_refill_units_per_sec,
+            per_ip_burst_units: config.per_ip_burst_units,
+            global_refill_units_per_sec: config.global_refill_units_per_sec,
+            global_burst_units: config.global_burst_units,
+            bucket_idle_ttl: config.bucket_idle_ttl,
+        };
+        self.rate_limiter.set_processing_budget_config(raw);
+        self.config.processing_budget = self.rate_limiter.processing_budget_config();
+    }
+
     pub fn set_rate_limit_config(&mut self, config: TransportRateLimitConfig) {
         self.rate_limiter.update_limits(
             config.per_ip_packet_limit,
@@ -1048,6 +1114,8 @@ impl TransportServer {
         }
 
         let r: RateLimiterMetricsSnapshot = self.rate_limiter.metrics_snapshot();
+        let p: ProcessingBudgetMetricsSnapshot =
+            self.rate_limiter.processing_budget_metrics_snapshot();
         total.rate_global_limit_hits = r.global_limit_hits;
         total.rate_ip_block_hits = r.ip_block_hits;
         total.rate_ip_block_hits_rate_exceeded = r.ip_block_hits_rate_exceeded;
@@ -1063,6 +1131,11 @@ impl TransportServer {
         total.rate_addresses_unblocked = r.addresses_unblocked;
         total.rate_blocked_addresses = r.blocked_addresses;
         total.rate_exception_addresses = r.exception_addresses;
+        total.processing_budget_drops_total = p.drops_total;
+        total.processing_budget_drops_ip_exhausted_total = p.drops_ip_exhausted;
+        total.processing_budget_drops_global_exhausted_total = p.drops_global_exhausted;
+        total.processing_budget_consumed_units_total = p.consumed_units_total;
+        total.processing_budget_active_ip_buckets = p.active_ip_buckets;
 
         if total.session_count > 0 {
             let denom = total.session_count as f64;
@@ -1291,6 +1364,11 @@ impl TransportServer {
             }
             OfflinePacket::OpenConnectionRequest1(req1) => {
                 if !supports_protocol(&self.config.supported_protocols, req1.protocol_version) {
+                    warn!(
+                        %addr,
+                        protocol_version = req1.protocol_version,
+                        "rejecting request1: incompatible protocol version"
+                    );
                     let incompatible =
                         OfflinePacket::IncompatibleProtocolVersion(IncompatibleProtocolVersion {
                             protocol_version: primary_protocol_version(
@@ -1307,6 +1385,7 @@ impl TransportServer {
                     self.handshake_ip_recently_connected_rejects = self
                         .handshake_ip_recently_connected_rejects
                         .saturating_add(1);
+                    warn!(%addr, "rejecting request1: ip recently connected");
                     self.send_ip_recently_connected(addr).await?;
                     return Ok(None);
                 }
@@ -1314,6 +1393,7 @@ impl TransportServer {
                 if self.has_active_session_for_offline_reject(addr) {
                     self.handshake_already_connected_rejects =
                         self.handshake_already_connected_rejects.saturating_add(1);
+                    warn!(%addr, "rejecting request1: already connected");
                     self.send_already_connected(addr).await?;
                     return Ok(None);
                 }
@@ -1323,11 +1403,13 @@ impl TransportServer {
                 }) {
                     self.handshake_already_connected_rejects =
                         self.handshake_already_connected_rejects.saturating_add(1);
+                    warn!(%addr, "rejecting request1: handshake already in progress");
                     self.send_already_connected(addr).await?;
                     return Ok(None);
                 }
 
                 if self.would_exceed_session_limit(addr) {
+                    warn!(%addr, "rejecting request1: session limit reached");
                     self.send_no_free_incoming_connections(addr).await?;
                     return Ok(Some(TransportEvent::SessionLimitReached { addr }));
                 }
@@ -1387,6 +1469,7 @@ impl TransportServer {
                     self.handshake_ip_recently_connected_rejects = self
                         .handshake_ip_recently_connected_rejects
                         .saturating_add(1);
+                    warn!(%addr, "rejecting request2: ip recently connected");
                     self.send_ip_recently_connected(addr).await?;
                     return Ok(None);
                 }
@@ -1394,6 +1477,7 @@ impl TransportServer {
                 if self.has_active_session_for_offline_reject(addr) {
                     self.handshake_already_connected_rejects =
                         self.handshake_already_connected_rejects.saturating_add(1);
+                    warn!(%addr, "rejecting request2: already connected");
                     self.send_already_connected(addr).await?;
                     return Ok(None);
                 }
@@ -1407,6 +1491,7 @@ impl TransportServer {
                                 self.request2_legacy_drops.saturating_add(1);
                             self.handshake_stage_cancel_drops =
                                 self.handshake_stage_cancel_drops.saturating_add(1);
+                            warn!(%addr, "dropping request2: legacy parse path disallowed");
                             let newly_blocked = self.record_handshake_violation(
                                 addr,
                                 HandshakeViolation::ParseAnomalyDrop,
@@ -1427,6 +1512,7 @@ impl TransportServer {
                                 self.request2_ambiguous_drops.saturating_add(1);
                             self.handshake_stage_cancel_drops =
                                 self.handshake_stage_cancel_drops.saturating_add(1);
+                            warn!(%addr, "dropping request2: ambiguous parse path rejected");
                             let newly_blocked = self.record_handshake_violation(
                                 addr,
                                 HandshakeViolation::ParseAnomalyDrop,
@@ -1447,6 +1533,12 @@ impl TransportServer {
                         self.request2_server_addr_mismatch_drops.saturating_add(1);
                     self.handshake_stage_cancel_drops =
                         self.handshake_stage_cancel_drops.saturating_add(1);
+                    warn!(
+                        %addr,
+                        request_server_addr = %req2.server_addr,
+                        local_server_addr = %local_server_addr,
+                        "dropping request2: server_addr mismatch"
+                    );
                     return Ok(None);
                 }
 
@@ -1455,6 +1547,7 @@ impl TransportServer {
                         self.handshake_missing_req1_drops.saturating_add(1);
                     self.handshake_stage_cancel_drops =
                         self.handshake_stage_cancel_drops.saturating_add(1);
+                    warn!(%addr, "dropping request2: missing pending request1");
                     let newly_blocked = self.record_handshake_violation(
                         addr,
                         HandshakeViolation::MissingPendingReq1,
@@ -1479,6 +1572,11 @@ impl TransportServer {
                     }
                     self.handshake_stage_cancel_drops =
                         self.handshake_stage_cancel_drops.saturating_add(1);
+                    warn!(
+                        %addr,
+                        stage = ?pending.stage,
+                        "dropping request2: pending handshake timed out"
+                    );
                     let violation = match pending.stage {
                         PendingHandshakeStage::AwaitingRequest2 => {
                             HandshakeViolation::Req1Req2Timeout
@@ -1501,6 +1599,7 @@ impl TransportServer {
                     self.cookie_mismatch_drops = self.cookie_mismatch_drops.saturating_add(1);
                     self.handshake_stage_cancel_drops =
                         self.handshake_stage_cancel_drops.saturating_add(1);
+                    warn!(%addr, "dropping request2: cookie verification failed");
                     let blocked_by_guard = self.record_cookie_mismatch(addr.ip(), now);
                     let blocked_by_heuristics = self.record_handshake_violation(
                         addr,
@@ -1539,6 +1638,7 @@ impl TransportServer {
                 }
 
                 if self.would_exceed_session_limit(addr) {
+                    warn!(%addr, "rejecting request2: session limit reached");
                     self.send_no_free_incoming_connections(addr).await?;
                     return Ok(Some(TransportEvent::SessionLimitReached { addr }));
                 }
@@ -1755,6 +1855,11 @@ impl TransportServer {
                     HandshakeViolation::Reply2ConnectTimeout
                 }
             };
+            warn!(
+                %addr,
+                stage = ?pending.stage,
+                "pending handshake expired and session is being closed"
+            );
             self.handshake_stage_cancel_drops = self.handshake_stage_cancel_drops.saturating_add(1);
             let _ = self.record_handshake_violation(addr, violation, now);
             self.close_session(addr);
@@ -1806,6 +1911,12 @@ impl TransportServer {
         );
         if newly_blocked {
             self.cookie_mismatch_blocks = self.cookie_mismatch_blocks.saturating_add(1);
+            warn!(
+                %ip,
+                mismatches_required = guard.mismatch_threshold,
+                block_secs = guard.block_duration.as_secs(),
+                "cookie mismatch guard blocked address"
+            );
         }
         newly_blocked
     }
@@ -1841,6 +1952,7 @@ impl TransportServer {
         if points == 0 {
             return false;
         }
+        debug!(%addr, ?violation, points, "recorded handshake violation");
 
         let mut should_block = false;
         {
@@ -1877,6 +1989,12 @@ impl TransportServer {
         );
         if newly_blocked {
             self.handshake_auto_blocks = self.handshake_auto_blocks.saturating_add(1);
+            warn!(
+                %addr,
+                ?violation,
+                block_secs = h.block_duration.as_secs(),
+                "handshake heuristic blocked address"
+            );
         }
         newly_blocked
     }
@@ -2244,6 +2362,43 @@ fn build_internal_addrs(server_addr: SocketAddr) -> [SocketAddr; SYSTEM_ADDRESS_
     addrs
 }
 
+fn estimate_connected_datagram_processing_cost(raw_len: usize, datagram: &Datagram) -> usize {
+    match &datagram.payload {
+        DatagramPayload::Ack(payload) | DatagramPayload::Nack(payload) => {
+            payload.ranges.len().saturating_mul(8).max(1)
+        }
+        DatagramPayload::Frames(frames) => {
+            let mut cost = raw_len.max(1);
+            cost = cost.saturating_add(frames.len().saturating_mul(48));
+
+            for frame in frames {
+                let payload_len = frame.payload.len();
+                cost = cost.saturating_add(payload_len);
+
+                if frame.header.reliability.is_reliable() {
+                    cost = cost.saturating_add(32);
+                }
+                if frame.header.reliability.is_ordered() || frame.header.reliability.is_sequenced()
+                {
+                    cost = cost.saturating_add(24);
+                }
+                if frame.header.is_split {
+                    let split_parts = frame
+                        .split
+                        .as_ref()
+                        .map(|s| s.part_count as usize)
+                        .unwrap_or(1);
+                    cost = cost.saturating_add(512);
+                    cost = cost.saturating_add(payload_len.saturating_mul(2));
+                    cost = cost.saturating_add(split_parts.min(2_048));
+                }
+            }
+
+            cost.max(1)
+        }
+    }
+}
+
 fn is_offline_packet_id(id: u8) -> bool {
     matches!(
         id,
@@ -2289,8 +2444,9 @@ mod tests {
 
     use super::{
         ConnectedFrameDelivery, ControlAction, HandshakeViolation, PendingHandshake,
-        PendingHandshakeStage, RemoteDisconnectReason, TransportEvent, TransportRateLimitConfig,
-        TransportServer, build_internal_addrs, is_connected_control_id, is_offline_packet_id,
+        PendingHandshakeStage, RemoteDisconnectReason, TransportEvent,
+        TransportProcessingBudgetConfig, TransportRateLimitConfig, TransportServer,
+        build_internal_addrs, is_connected_control_id, is_offline_packet_id,
         primary_protocol_version, supports_protocol,
     };
     use crate::error::DecodeError;
@@ -2301,7 +2457,10 @@ mod tests {
         ConnectedControlPacket, ConnectedPing, ConnectionRequest, DetectLostConnection,
         DisconnectionNotification,
     };
-    use crate::protocol::constants::{DEFAULT_UNCONNECTED_MAGIC, RAKNET_PROTOCOL_VERSION};
+    use crate::protocol::constants::{
+        DEFAULT_UNCONNECTED_MAGIC, DatagramFlags, RAKNET_PROTOCOL_VERSION,
+    };
+    use crate::protocol::datagram::{Datagram, DatagramHeader, DatagramPayload};
     use crate::protocol::frame::Frame;
     use crate::protocol::frame_header::FrameHeader;
     use crate::protocol::reliability::Reliability;
@@ -2309,8 +2468,8 @@ mod tests {
     use crate::session::tunables::SessionTunables;
     use crate::session::{QueuePayloadResult, RakPriority, Session, SessionState};
     use crate::transport::config::{
-        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, Request2ServerAddrPolicy,
-        TransportConfig, TransportSocketTuning,
+        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, ProcessingBudgetConfig,
+        Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
     };
 
     fn build_test_server(mut config: TransportConfig) -> TransportServer {
@@ -3054,6 +3213,160 @@ mod tests {
         assert_eq!(metrics.remote_disconnect_notifications, 1);
         assert_eq!(metrics.remote_detect_lost_disconnects, 1);
         assert_eq!(metrics.sessions_closed_total, 1);
+    }
+
+    #[test]
+    fn processing_budget_config_updates_sync_with_transport_config() {
+        let mut server = build_test_server(TransportConfig::default());
+        server.set_processing_budget_config(TransportProcessingBudgetConfig {
+            enabled: true,
+            per_ip_refill_units_per_sec: 0,
+            per_ip_burst_units: 0,
+            global_refill_units_per_sec: 0,
+            global_burst_units: 0,
+            bucket_idle_ttl: Duration::ZERO,
+        });
+
+        let effective = server.processing_budget_config();
+        assert!(effective.enabled);
+        assert_eq!(effective.per_ip_refill_units_per_sec, 1);
+        assert_eq!(effective.per_ip_burst_units, 1);
+        assert_eq!(effective.global_refill_units_per_sec, 1);
+        assert_eq!(effective.global_burst_units, 1);
+        assert_eq!(effective.bucket_idle_ttl, Duration::from_millis(1));
+        assert_eq!(
+            server
+                .config()
+                .processing_budget
+                .per_ip_refill_units_per_sec,
+            1
+        );
+        assert_eq!(server.config().processing_budget.per_ip_burst_units, 1);
+        assert_eq!(
+            server
+                .config()
+                .processing_budget
+                .global_refill_units_per_sec,
+            1
+        );
+        assert_eq!(server.config().processing_budget.global_burst_units, 1);
+        assert_eq!(
+            server.config().processing_budget.bucket_idle_ttl,
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn processing_budget_exhaustion_drops_datagram_without_forcing_disconnect() {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime must build");
+        rt.block_on(async {
+            let mut config = TransportConfig {
+                per_ip_packet_limit: 10_000,
+                global_packet_limit: 10_000,
+                processing_budget: ProcessingBudgetConfig {
+                    enabled: true,
+                    per_ip_refill_units_per_sec: 1,
+                    per_ip_burst_units: 1,
+                    global_refill_units_per_sec: 10_000,
+                    global_burst_units: 10_000,
+                    bucket_idle_ttl: Duration::from_secs(5),
+                },
+                ..TransportConfig::default()
+            };
+
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind should succeed");
+            config.bind_addr = socket.local_addr().expect("local addr should be available");
+            let server_addr = config.bind_addr;
+            let mut server =
+                TransportServer::with_socket(config, socket).expect("server should build");
+
+            let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("client bind should succeed");
+            let client_addr = client.local_addr().expect("client local addr");
+
+            let mut session = Session::new(1492);
+            assert!(TransportServer::apply_session_transitions(
+                &mut session,
+                &[
+                    SessionState::Req1Recv,
+                    SessionState::Reply1Sent,
+                    SessionState::Req2Recv,
+                    SessionState::Reply2Sent,
+                    SessionState::ConnReqRecv,
+                    SessionState::ConnReqAcceptedSent,
+                    SessionState::NewIncomingRecv,
+                    SessionState::Connected,
+                ],
+            ));
+            server.sessions.insert(client_addr, session);
+
+            let make_datagram = |seq: u32| Datagram {
+                header: DatagramHeader {
+                    flags: DatagramFlags::VALID,
+                    sequence: Sequence24::new(seq),
+                },
+                payload: DatagramPayload::Frames(vec![Frame {
+                    header: FrameHeader::new(Reliability::Unreliable, false, false),
+                    bit_length: (8u16) << 3,
+                    reliable_index: None,
+                    sequence_index: None,
+                    ordering_index: None,
+                    ordering_channel: None,
+                    split: None,
+                    payload: Bytes::from_static(b"payload!"),
+                }]),
+            };
+
+            let mut first = BytesMut::new();
+            make_datagram(1)
+                .encode(&mut first)
+                .expect("datagram encode should succeed");
+            client
+                .send_to(&first, server_addr)
+                .await
+                .expect("send first datagram should succeed");
+            let first_event =
+                tokio::time::timeout(Duration::from_secs(1), server.recv_and_process())
+                    .await
+                    .expect("first recv should complete")
+                    .expect("first recv should succeed");
+            assert!(
+                matches!(first_event, TransportEvent::ConnectedFrames { .. }),
+                "first datagram should pass before budget is depleted"
+            );
+
+            let mut second = BytesMut::new();
+            make_datagram(2)
+                .encode(&mut second)
+                .expect("datagram encode should succeed");
+            client
+                .send_to(&second, server_addr)
+                .await
+                .expect("send second datagram should succeed");
+            let second_event =
+                tokio::time::timeout(Duration::from_secs(1), server.recv_and_process())
+                    .await
+                    .expect("second recv should complete")
+                    .expect("second recv should succeed");
+            assert!(
+                matches!(second_event, TransportEvent::RateLimited { addr } if addr == client_addr),
+                "second datagram should be dropped by processing budget"
+            );
+
+            assert!(
+                server.sessions.contains_key(&client_addr),
+                "budget drop must not force disconnect"
+            );
+            let metrics = server.metrics_snapshot();
+            assert_eq!(metrics.processing_budget_drops_total, 1);
+            assert_eq!(metrics.processing_budget_drops_ip_exhausted_total, 1);
+        });
     }
 
     #[test]

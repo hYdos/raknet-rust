@@ -97,16 +97,13 @@ where
     let deadline = Instant::now() + budget;
     let mut reasons = Vec::new();
     while Instant::now() < deadline {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(30), proxy.next_event()).await {
-            if let RaknetRelayProxyEvent::SessionClosed {
-                peer_id: closed_peer_id,
-                reason,
-            } = event
-            {
-                if closed_peer_id == peer_id {
-                    reasons.push(reason);
-                }
-            }
+        if let Ok(Some(RaknetRelayProxyEvent::SessionClosed {
+            peer_id: closed_peer_id,
+            reason,
+        })) = timeout(Duration::from_millis(30), proxy.next_event()).await
+            && closed_peer_id == peer_id
+        {
+            reasons.push(reason);
         }
     }
 
@@ -373,15 +370,12 @@ async fn proxy_policy_can_drop_downstream_payloads_before_upstream() -> io::Resu
     let mut saw_drop_event = false;
 
     while Instant::now() < deadline {
-        if let Ok(Some(proxy_event)) = timeout(Duration::from_millis(20), proxy.next_event()).await
+        if let Ok(Some(RaknetRelayProxyEvent::Dropped {
+            direction: RelayDirection::DownstreamToUpstream,
+            ..
+        })) = timeout(Duration::from_millis(20), proxy.next_event()).await
         {
-            if let RaknetRelayProxyEvent::Dropped {
-                direction: RelayDirection::DownstreamToUpstream,
-                ..
-            } = proxy_event
-            {
-                saw_drop_event = true;
-            }
+            saw_drop_event = true;
         }
 
         if let Ok(Some(server_event)) =
@@ -457,28 +451,23 @@ async fn proxy_policy_disconnect_closes_downstream_session() -> io::Result<()> {
     let mut saw_client_disconnect = false;
 
     while Instant::now() < deadline {
-        if let Ok(Some(proxy_event)) = timeout(Duration::from_millis(20), proxy.next_event()).await
+        if let Ok(Some(RaknetRelayProxyEvent::SessionClosed {
+            reason:
+                RelaySessionCloseReason::PolicyDisconnect {
+                    direction: RelayDirection::DownstreamToUpstream,
+                    reason: "blocked_by_policy",
+                },
+            ..
+        })) = timeout(Duration::from_millis(20), proxy.next_event()).await
         {
-            if let RaknetRelayProxyEvent::SessionClosed {
-                reason:
-                    RelaySessionCloseReason::PolicyDisconnect {
-                        direction: RelayDirection::DownstreamToUpstream,
-                        reason: "blocked_by_policy",
-                    },
-                ..
-            } = proxy_event
-            {
-                saw_policy_disconnect = true;
-            }
+            saw_policy_disconnect = true;
         }
 
-        if let Ok(Some(client_event)) =
+        if let Ok(Some(RaknetClientEvent::Disconnected { .. })) =
             timeout(Duration::from_millis(20), client.next_event()).await
         {
-            if matches!(client_event, RaknetClientEvent::Disconnected { .. }) {
-                saw_client_disconnect = true;
-                break;
-            }
+            saw_client_disconnect = true;
+            break;
         }
     }
 
@@ -623,25 +612,20 @@ async fn proxy_budget_overflow_drop_newest_drops_packet_without_closing_session(
     let mut saw_budget_drop = false;
     let mut saw_upstream_packet = false;
     while Instant::now() < deadline {
-        if let Ok(Some(proxy_event)) = timeout(Duration::from_millis(20), proxy.next_event()).await
+        if let Ok(Some(RaknetRelayProxyEvent::Dropped {
+            direction: RelayDirection::DownstreamToUpstream,
+            reason: RelayDropReason::BudgetExceeded(_),
+            ..
+        })) = timeout(Duration::from_millis(20), proxy.next_event()).await
         {
-            if let RaknetRelayProxyEvent::Dropped {
-                direction: RelayDirection::DownstreamToUpstream,
-                reason: RelayDropReason::BudgetExceeded(_),
-                ..
-            } = proxy_event
-            {
-                saw_budget_drop = true;
-            }
+            saw_budget_drop = true;
         }
 
-        if let Ok(Some(server_event)) =
+        if let Ok(Some(RaknetServerEvent::Packet { .. })) =
             timeout(Duration::from_millis(20), upstream.next_event()).await
         {
-            if matches!(server_event, RaknetServerEvent::Packet { .. }) {
-                saw_upstream_packet = true;
-                break;
-            }
+            saw_upstream_packet = true;
+            break;
         }
     }
 
@@ -689,22 +673,18 @@ async fn proxy_budget_overflow_disconnect_closes_session() -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut saw_budget_close = false;
     while Instant::now() < deadline {
-        if let Ok(Some(proxy_event)) = timeout(Duration::from_millis(20), proxy.next_event()).await
+        if let Ok(Some(RaknetRelayProxyEvent::SessionClosed {
+            peer_id,
+            reason:
+                RelaySessionCloseReason::BudgetExceeded {
+                    direction: RelayDirection::DownstreamToUpstream,
+                    ..
+                },
+        })) = timeout(Duration::from_millis(20), proxy.next_event()).await
+            && peer_id == session_peer_id
         {
-            if let RaknetRelayProxyEvent::SessionClosed {
-                peer_id,
-                reason:
-                    RelaySessionCloseReason::BudgetExceeded {
-                        direction: RelayDirection::DownstreamToUpstream,
-                        ..
-                    },
-            } = proxy_event
-            {
-                if peer_id == session_peer_id {
-                    saw_budget_close = true;
-                    break;
-                }
-            }
+            saw_budget_close = true;
+            break;
         }
     }
 

@@ -129,7 +129,76 @@ impl CookieMismatchGuardConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessingBudgetConfig {
+    pub enabled: bool,
+    pub per_ip_refill_units_per_sec: u32,
+    pub per_ip_burst_units: u32,
+    pub global_refill_units_per_sec: u32,
+    pub global_burst_units: u32,
+    pub bucket_idle_ttl: Duration,
+}
+
+impl Default for ProcessingBudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            per_ip_refill_units_per_sec: 3_000_000,
+            per_ip_burst_units: 1_500_000,
+            global_refill_units_per_sec: 128_000_000,
+            global_burst_units: 32_000_000,
+            bucket_idle_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ProcessingBudgetConfig {
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if self.per_ip_refill_units_per_sec == 0 {
+            return Err(ConfigValidationError::new(
+                "ProcessingBudgetConfig",
+                "per_ip_refill_units_per_sec",
+                "must be >= 1 when enabled",
+            ));
+        }
+        if self.per_ip_burst_units == 0 {
+            return Err(ConfigValidationError::new(
+                "ProcessingBudgetConfig",
+                "per_ip_burst_units",
+                "must be >= 1 when enabled",
+            ));
+        }
+        if self.global_refill_units_per_sec == 0 {
+            return Err(ConfigValidationError::new(
+                "ProcessingBudgetConfig",
+                "global_refill_units_per_sec",
+                "must be >= 1 when enabled",
+            ));
+        }
+        if self.global_burst_units == 0 {
+            return Err(ConfigValidationError::new(
+                "ProcessingBudgetConfig",
+                "global_burst_units",
+                "must be >= 1 when enabled",
+            ));
+        }
+        if self.bucket_idle_ttl.is_zero() {
+            return Err(ConfigValidationError::new(
+                "ProcessingBudgetConfig",
+                "bucket_idle_ttl",
+                "must be > 0 when enabled",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TransportSocketTuning {
     pub recv_buffer_size: Option<usize>,
     pub send_buffer_size: Option<usize>,
@@ -137,19 +206,6 @@ pub struct TransportSocketTuning {
     pub ipv4_tos: Option<u32>,
     pub ipv6_unicast_hops: Option<u32>,
     pub disable_ip_fragmentation: bool,
-}
-
-impl Default for TransportSocketTuning {
-    fn default() -> Self {
-        Self {
-            recv_buffer_size: None,
-            send_buffer_size: None,
-            ipv4_ttl: None,
-            ipv4_tos: None,
-            ipv6_unicast_hops: None,
-            disable_ip_fragmentation: false,
-        }
-    }
 }
 
 impl TransportSocketTuning {
@@ -196,17 +252,12 @@ impl TransportSocketTuning {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Request2ServerAddrPolicy {
     Disabled,
+    #[default]
     PortOnly,
     Exact,
-}
-
-impl Default for Request2ServerAddrPolicy {
-    fn default() -> Self {
-        Self::PortOnly
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +288,7 @@ pub struct TransportConfig {
     pub global_packet_limit: usize,
     pub rate_window: Duration,
     pub block_duration: Duration,
+    pub processing_budget: ProcessingBudgetConfig,
     pub max_sessions: usize,
     pub session_idle_timeout: Duration,
     pub session_keepalive_interval: Duration,
@@ -274,6 +326,7 @@ impl Default for TransportConfig {
             global_packet_limit: 100_000,
             rate_window: Duration::from_millis(10),
             block_duration: Duration::from_secs(10),
+            processing_budget: ProcessingBudgetConfig::default(),
             max_sessions: 20_000,
             session_idle_timeout: Duration::from_secs(30),
             session_keepalive_interval: Duration::from_secs(10),
@@ -345,6 +398,7 @@ impl TransportConfig {
                 "must be > 0",
             ));
         }
+        self.processing_budget.validate()?;
         if self.max_sessions == 0 {
             return Err(ConfigValidationError::new(
                 "TransportConfig",
@@ -442,8 +496,8 @@ impl TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, Request2ServerAddrPolicy,
-        TransportConfig, TransportSocketTuning,
+        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, ProcessingBudgetConfig,
+        Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
     };
     use crate::handshake::MAX_UNCONNECTED_PONG_MOTD_BYTES;
     use crate::protocol::constants::DEFAULT_UNCONNECTED_MAGIC;
@@ -529,6 +583,34 @@ mod tests {
         guard
             .validate()
             .expect("disabled cookie mismatch guard should allow zero fields");
+    }
+
+    #[test]
+    fn processing_budget_validate_rejects_zero_fields_when_enabled() {
+        let cfg = ProcessingBudgetConfig {
+            enabled: true,
+            per_ip_refill_units_per_sec: 0,
+            ..ProcessingBudgetConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("per_ip_refill_units_per_sec=0 must be rejected");
+        assert_eq!(err.config, "ProcessingBudgetConfig");
+        assert_eq!(err.field, "per_ip_refill_units_per_sec");
+    }
+
+    #[test]
+    fn processing_budget_disabled_allows_zero_fields() {
+        let cfg = ProcessingBudgetConfig {
+            enabled: false,
+            per_ip_refill_units_per_sec: 0,
+            per_ip_burst_units: 0,
+            global_refill_units_per_sec: 0,
+            global_burst_units: 0,
+            bucket_idle_ttl: Duration::ZERO,
+        };
+        cfg.validate()
+            .expect("disabled processing budget should allow zero fields");
     }
 
     #[test]

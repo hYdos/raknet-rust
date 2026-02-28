@@ -10,7 +10,7 @@ pub use config::{HandshakeHeuristicsConfig, TransportConfig};
 pub use proxy::{IdentityProxyRouter, InboundProxyRoute, OutboundProxyRoute, ProxyRouter};
 pub use runtime::{
     EventOverflowPolicy, ShardedRuntimeCommand, ShardedRuntimeConfig, ShardedRuntimeEvent,
-    ShardedRuntimeHandle, spawn_sharded_runtime,
+    ShardedRuntimeHandle, ShardedSendPayload, spawn_sharded_runtime,
 };
 pub use server::{
     ConnectedFrameDelivery, QueueDispatchResult, RemoteDisconnectReason, TransportEvent,

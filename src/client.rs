@@ -7,6 +7,7 @@ use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::{self, sleep};
+use tracing::{debug, info, warn};
 
 use crate::error::ConfigValidationError;
 use crate::handshake::{
@@ -457,6 +458,7 @@ impl RaknetClient {
         let local_addr = config
             .local_addr
             .unwrap_or_else(|| default_bind_addr_for_server(server_addr));
+        info!(%server_addr, %local_addr, "client connecting");
         let socket = UdpSocket::bind(local_addr)
             .await
             .map_err(RaknetClientError::from)?;
@@ -475,6 +477,11 @@ impl RaknetClient {
         };
 
         client.perform_handshake().await?;
+        info!(
+            %server_addr,
+            mtu = client.session.mtu(),
+            "client handshake established"
+        );
         client
             .pending_events
             .push_back(RaknetClientEvent::Connected {
@@ -640,6 +647,7 @@ impl RaknetClient {
     }
 
     async fn perform_handshake(&mut self) -> ClientResult<()> {
+        debug!(server_addr = %self.server_addr, "starting client handshake");
         if !self.session.transition_to(SessionState::Req1Recv) {
             return Err(RaknetClientError::HandshakeProtocolViolation {
                 details: "session transition failed before request1".to_string(),
@@ -754,6 +762,7 @@ impl RaknetClient {
             });
         }
 
+        debug!(server_addr = %self.server_addr, "client handshake completed");
         self.last_inbound_activity = Instant::now();
         Ok(())
     }
@@ -766,6 +775,11 @@ impl RaknetClient {
         for mtu in candidates {
             for _ in 0..self.config.mtu_probe_attempts_per_step {
                 if Instant::now() >= overall_deadline {
+                    warn!(
+                        server_addr = %self.server_addr,
+                        stage = ?HandshakeStage::OpenConnectionRequest1,
+                        "client handshake timed out"
+                    );
                     return Err(RaknetClientError::HandshakeTimeout {
                         stage: HandshakeStage::OpenConnectionRequest1,
                     });
@@ -792,6 +806,11 @@ impl RaknetClient {
             }
         }
 
+        warn!(
+            server_addr = %self.server_addr,
+            stage = ?HandshakeStage::OpenConnectionRequest1,
+            "client handshake timed out after mtu probing"
+        );
         Err(RaknetClientError::HandshakeTimeout {
             stage: HandshakeStage::OpenConnectionRequest1,
         })
@@ -854,6 +873,11 @@ impl RaknetClient {
             let packet = match self.recv_packet_until(deadline).await? {
                 Some(packet) => packet,
                 None => {
+                    warn!(
+                        server_addr = %self.server_addr,
+                        stage = ?HandshakeStage::OpenConnectionRequest2,
+                        "client handshake timed out waiting for reply2"
+                    );
                     return Err(RaknetClientError::HandshakeTimeout {
                         stage: HandshakeStage::OpenConnectionRequest2,
                     });
@@ -883,6 +907,11 @@ impl RaknetClient {
             let packet = match self.recv_packet_until(deadline).await? {
                 Some(packet) => packet,
                 None => {
+                    warn!(
+                        server_addr = %self.server_addr,
+                        stage = ?HandshakeStage::ConnectionRequestAccepted,
+                        "client handshake timed out waiting for request accepted"
+                    );
                     return Err(RaknetClientError::HandshakeTimeout {
                         stage: HandshakeStage::ConnectionRequestAccepted,
                     });
@@ -1301,6 +1330,18 @@ impl RaknetClient {
 
         self.close_reason = Some(reason.clone());
         self.closed = true;
+        match &reason {
+            ClientDisconnectReason::Requested
+            | ClientDisconnectReason::RemoteDisconnectionNotification { .. }
+            | ClientDisconnectReason::RemoteDetectLostConnection => {
+                info!(server_addr = %self.server_addr, ?reason, "client closed")
+            }
+            ClientDisconnectReason::Backpressure
+            | ClientDisconnectReason::IdleTimeout
+            | ClientDisconnectReason::TransportError { .. } => {
+                warn!(server_addr = %self.server_addr, ?reason, "client closed")
+            }
+        }
         self.pending_events
             .push_back(RaknetClientEvent::Disconnected { reason });
     }

@@ -166,6 +166,15 @@ pub enum ShardedRuntimeCommand {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct ShardedSendPayload {
+    pub addr: SocketAddr,
+    pub payload: Bytes,
+    pub reliability: Reliability,
+    pub channel: u8,
+    pub priority: RakPriority,
+}
+
 pub struct ShardedRuntimeHandle {
     pub event_rx: mpsc::Receiver<ShardedRuntimeEvent>,
     shutdown_tx: broadcast::Sender<()>,
@@ -181,20 +190,16 @@ impl ShardedRuntimeHandle {
     pub async fn send_payload_to_shard(
         &self,
         shard_id: usize,
-        addr: SocketAddr,
-        payload: Bytes,
-        reliability: Reliability,
-        channel: u8,
-        priority: RakPriority,
+        payload: ShardedSendPayload,
     ) -> io::Result<()> {
         self.send_command_to_shard(
             shard_id,
             ShardedRuntimeCommand::SendPayload {
-                addr,
-                payload,
-                reliability,
-                channel,
-                priority,
+                addr: payload.addr,
+                payload: payload.payload,
+                reliability: payload.reliability,
+                channel: payload.channel,
+                priority: payload.priority,
                 receipt_id: None,
             },
         )
@@ -204,21 +209,17 @@ impl ShardedRuntimeHandle {
     pub async fn send_payload_to_shard_with_receipt(
         &self,
         shard_id: usize,
-        addr: SocketAddr,
-        payload: Bytes,
-        reliability: Reliability,
-        channel: u8,
-        priority: RakPriority,
+        payload: ShardedSendPayload,
         receipt_id: u64,
     ) -> io::Result<()> {
         self.send_command_to_shard(
             shard_id,
             ShardedRuntimeCommand::SendPayload {
-                addr,
-                payload,
-                reliability,
-                channel,
-                priority,
+                addr: payload.addr,
+                payload: payload.payload,
+                reliability: payload.reliability,
+                channel: payload.channel,
+                priority: payload.priority,
                 receipt_id: Some(receipt_id),
             },
         )

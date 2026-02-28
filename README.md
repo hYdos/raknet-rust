@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/Status-Alpha-orange)](#)
 [![Platform](https://img.shields.io/badge/Platform-%20RakNet-2ea44f)](#)
 
-`raknet-rustt` is a RakNet transport library written in Rust.
+`raknet-rust` is a RakNet transport library written in Rust.
 
 It is built for modern async server/client networking and is especially useful for
 Minecraft Bedrock Edition projects (servers, proxies, and tooling), while still remaining
@@ -66,6 +66,14 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 ```
+
+## Observability
+
+- Runtime tarafi `tracing` event'leri uretir (baglanti, disconnect, decode error, handshake reject/timeout).
+- Uygulamada log almak icin bir subscriber kurman yeterli (ornek: `tracing-subscriber`).
+- Prometheus format export icin `telemetry::TelemetryExporter` kullanabilirsin:
+  - `exporter.ingest_server_event(&event)`
+  - `let body = exporter.render_prometheus()`
 
 ## License
 

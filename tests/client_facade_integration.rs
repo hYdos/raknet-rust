@@ -87,16 +87,14 @@ async fn next_non_metrics_server_event(server: &mut RaknetServer) -> RaknetServe
 async fn wait_for_server_peer_connected(server: &mut RaknetServer) -> (PeerId, SocketAddr) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        match next_non_metrics_server_event(server).await {
-            RaknetServerEvent::PeerConnected {
-                peer_id,
-                addr,
-                shard_id,
-            } => {
-                assert_eq!(shard_id, 0, "single-shard server must report shard 0");
-                return (peer_id, addr);
-            }
-            _ => {}
+        if let RaknetServerEvent::PeerConnected {
+            peer_id,
+            addr,
+            shard_id,
+        } = next_non_metrics_server_event(server).await
+        {
+            assert_eq!(shard_id, 0, "single-shard server must report shard 0");
+            return (peer_id, addr);
         }
     }
 

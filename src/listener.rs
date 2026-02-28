@@ -372,10 +372,12 @@ async fn run_listener_worker(
                         }
                     }
                     RaknetServerEvent::DecodeError { addr, error } => {
-                        if let Some(peer_id) = peer_ids_by_addr.get(&addr).copied() {
-                            if let Some(entry) = peers.get(&peer_id) {
-                                let _ = entry.inbound_tx.try_send(ConnectionInbound::DecodeError(error));
-                            }
+                        if let Some(peer_id) = peer_ids_by_addr.get(&addr).copied()
+                            && let Some(entry) = peers.get(&peer_id)
+                        {
+                            let _ = entry
+                                .inbound_tx
+                                .try_send(ConnectionInbound::DecodeError(error));
                         }
                     }
                     RaknetServerEvent::PeerRateLimited { .. }

@@ -255,10 +255,28 @@ impl TelemetryRegistry {
             total.rate_exception_addresses = total
                 .rate_exception_addresses
                 .saturating_add(s.rate_exception_addresses);
+            total.processing_budget_drops_total = total
+                .processing_budget_drops_total
+                .saturating_add(s.processing_budget_drops_total);
+            total.processing_budget_drops_ip_exhausted_total = total
+                .processing_budget_drops_ip_exhausted_total
+                .saturating_add(s.processing_budget_drops_ip_exhausted_total);
+            total.processing_budget_drops_global_exhausted_total = total
+                .processing_budget_drops_global_exhausted_total
+                .saturating_add(s.processing_budget_drops_global_exhausted_total);
+            total.processing_budget_consumed_units_total = total
+                .processing_budget_consumed_units_total
+                .saturating_add(s.processing_budget_consumed_units_total);
+            total.processing_budget_active_ip_buckets = total
+                .processing_budget_active_ip_buckets
+                .saturating_add(s.processing_budget_active_ip_buckets);
             total.cookie_rotations = total.cookie_rotations.saturating_add(s.cookie_rotations);
             total.cookie_mismatch_drops = total
                 .cookie_mismatch_drops
                 .saturating_add(s.cookie_mismatch_drops);
+            total.cookie_mismatch_blocks = total
+                .cookie_mismatch_blocks
+                .saturating_add(s.cookie_mismatch_blocks);
             total.handshake_stage_cancel_drops = total
                 .handshake_stage_cancel_drops
                 .saturating_add(s.handshake_stage_cancel_drops);
@@ -688,6 +706,31 @@ impl TelemetryRegistry {
             rate_exception_addresses
         );
         push_snapshot_counter!(
+            "processing_budget_drops_total",
+            "Connected datagrams dropped by processing budget limiter",
+            processing_budget_drops_total
+        );
+        push_snapshot_counter!(
+            "processing_budget_drops_ip_exhausted_total",
+            "Connected datagrams dropped because per-IP processing budget was exhausted",
+            processing_budget_drops_ip_exhausted_total
+        );
+        push_snapshot_counter!(
+            "processing_budget_drops_global_exhausted_total",
+            "Connected datagrams dropped because global processing budget was exhausted",
+            processing_budget_drops_global_exhausted_total
+        );
+        push_snapshot_counter!(
+            "processing_budget_consumed_units_total",
+            "Total processing budget units consumed by connected datagrams",
+            processing_budget_consumed_units_total
+        );
+        push_snapshot_gauge!(
+            "processing_budget_active_ip_buckets",
+            "Active per-IP processing budget buckets",
+            processing_budget_active_ip_buckets
+        );
+        push_snapshot_counter!(
             "cookie_rotations_total",
             "Cookie key rotations",
             cookie_rotations
@@ -696,6 +739,11 @@ impl TelemetryRegistry {
             "cookie_mismatch_drops_total",
             "Dropped handshakes due to cookie mismatch",
             cookie_mismatch_drops
+        );
+        push_snapshot_counter!(
+            "cookie_mismatch_blocks_total",
+            "Addresses blocked by cookie mismatch guard",
+            cookie_mismatch_blocks
         );
         push_snapshot_counter!(
             "handshake_stage_cancel_drops_total",
@@ -1171,6 +1219,31 @@ impl TelemetryRegistry {
             rate_exception_addresses
         );
         write_snapshot_counter!(
+            "processing_budget_drops_total",
+            "Connected datagrams dropped by processing budget limiter",
+            processing_budget_drops_total
+        );
+        write_snapshot_counter!(
+            "processing_budget_drops_ip_exhausted_total",
+            "Connected datagrams dropped because per-IP processing budget was exhausted",
+            processing_budget_drops_ip_exhausted_total
+        );
+        write_snapshot_counter!(
+            "processing_budget_drops_global_exhausted_total",
+            "Connected datagrams dropped because global processing budget was exhausted",
+            processing_budget_drops_global_exhausted_total
+        );
+        write_snapshot_counter!(
+            "processing_budget_consumed_units_total",
+            "Total processing budget units consumed by connected datagrams",
+            processing_budget_consumed_units_total
+        );
+        write_snapshot_gauge!(
+            "processing_budget_active_ip_buckets",
+            "Active per-IP processing budget buckets",
+            processing_budget_active_ip_buckets
+        );
+        write_snapshot_counter!(
             "cookie_rotations_total",
             "Cookie key rotations",
             cookie_rotations
@@ -1179,6 +1252,11 @@ impl TelemetryRegistry {
             "cookie_mismatch_drops_total",
             "Dropped handshakes due to cookie mismatch",
             cookie_mismatch_drops
+        );
+        write_snapshot_counter!(
+            "cookie_mismatch_blocks_total",
+            "Addresses blocked by cookie mismatch guard",
+            cookie_mismatch_blocks
         );
         write_snapshot_counter!(
             "handshake_stage_cancel_drops_total",
@@ -1363,9 +1441,83 @@ impl TelemetryRegistry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TelemetryExporter {
+    registry: TelemetryRegistry,
+    prefix: String,
+}
+
+impl Default for TelemetryExporter {
+    fn default() -> Self {
+        Self {
+            registry: TelemetryRegistry::new(),
+            prefix: "raknet".to_string(),
+        }
+    }
+}
+
+impl TelemetryExporter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_prefix(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    pub fn set_prefix(&mut self, prefix: impl Into<String>) {
+        self.prefix = prefix.into();
+    }
+
+    pub fn clear(&mut self) {
+        self.registry.clear();
+    }
+
+    pub fn shard_count(&self) -> usize {
+        self.registry.shard_count()
+    }
+
+    pub fn ingest_snapshot(
+        &mut self,
+        shard_id: usize,
+        snapshot: TransportMetricsSnapshot,
+        dropped_non_critical_events: u64,
+    ) {
+        self.registry
+            .ingest_snapshot(shard_id, snapshot, dropped_non_critical_events);
+    }
+
+    pub fn ingest_server_event(&mut self, event: &RaknetServerEvent) -> bool {
+        self.registry.ingest_server_event(event)
+    }
+
+    pub fn aggregate(&self) -> AggregatedTelemetrySnapshot {
+        self.registry.aggregate()
+    }
+
+    pub fn render_prometheus(&self) -> String {
+        self.registry.render_prometheus_with_prefix(&self.prefix)
+    }
+
+    pub fn records(&self) -> Vec<TelemetryRecord> {
+        self.registry.to_records_with_prefix(&self.prefix)
+    }
+
+    pub fn registry(&self) -> &TelemetryRegistry {
+        &self.registry
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TelemetryMetricKind, TelemetryRegistry};
+    use super::{TelemetryExporter, TelemetryMetricKind, TelemetryRegistry};
     use crate::server::RaknetServerEvent;
     use crate::transport::TransportMetricsSnapshot;
 
@@ -1410,6 +1562,8 @@ mod tests {
             ingress_datagrams: 100,
             resent_datagrams: 20,
             reliable_sent_datagrams: 200,
+            processing_budget_drops_total: 3,
+            processing_budget_consumed_units_total: 10_000,
             avg_srtt_ms: 10.0,
             avg_rttvar_ms: 3.0,
             avg_resend_rto_ms: 25.0,
@@ -1421,6 +1575,8 @@ mod tests {
             ingress_datagrams: 50,
             resent_datagrams: 10,
             reliable_sent_datagrams: 100,
+            processing_budget_drops_total: 5,
+            processing_budget_consumed_units_total: 20_000,
             avg_srtt_ms: 40.0,
             avg_rttvar_ms: 6.0,
             avg_resend_rto_ms: 55.0,
@@ -1436,6 +1592,11 @@ mod tests {
         assert_eq!(total.snapshot.ingress_datagrams, 150);
         assert_eq!(total.snapshot.resent_datagrams, 30);
         assert_eq!(total.snapshot.reliable_sent_datagrams, 300);
+        assert_eq!(total.snapshot.processing_budget_drops_total, 8);
+        assert_eq!(
+            total.snapshot.processing_budget_consumed_units_total,
+            30_000
+        );
         assert_eq!(total.dropped_non_critical_events, 9);
 
         assert!((total.snapshot.avg_srtt_ms - 20.0).abs() < 1e-9);
@@ -1457,6 +1618,7 @@ mod tests {
             bytes_forwarded_total: 321,
             ack_out_total: 4,
             nack_out_total: 1,
+            processing_budget_drops_total: 2,
             ..TransportMetricsSnapshot::default()
         };
         registry.ingest_snapshot(2, snapshot, 5);
@@ -1470,6 +1632,9 @@ mod tests {
         assert!(body.contains("raknet_bytes_forwarded_total{scope=\"all\",shard=\"all\"} 321"));
         assert!(body.contains("raknet_ack_out_total{scope=\"all\",shard=\"all\"} 4"));
         assert!(body.contains("raknet_nack_out_total{scope=\"all\",shard=\"all\"} 1"));
+        assert!(
+            body.contains("raknet_processing_budget_drops_total{scope=\"all\",shard=\"all\"} 2")
+        );
         assert!(body.contains("# HELP raknet_session_count Active RakNet sessions"));
         assert!(body.contains("# TYPE raknet_session_count gauge"));
         assert!(body.contains("raknet_session_count{scope=\"shard\",shard=\"2\"} 1"));
@@ -1526,5 +1691,21 @@ mod tests {
 
         assert_eq!(target.kind, TelemetryMetricKind::Gauge);
         assert!((target.value - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn telemetry_exporter_uses_prefix_and_ingests_metrics_events() {
+        let mut exporter = TelemetryExporter::with_prefix("demo");
+        let snapshot = TransportMetricsSnapshot {
+            session_count: 2,
+            sessions_started_total: 5,
+            ..TransportMetricsSnapshot::default()
+        };
+        assert!(exporter.ingest_server_event(&metrics_event(0, snapshot, 0)));
+        assert_eq!(exporter.shard_count(), 1);
+
+        let body = exporter.render_prometheus();
+        assert!(body.contains("demo_sessions_active"));
+        assert!(body.contains("demo_sessions_started_total"));
     }
 }

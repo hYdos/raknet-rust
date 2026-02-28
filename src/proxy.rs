@@ -137,19 +137,10 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UpstreamConnectorConfig {
     pub client_config: RaknetClientConfig,
     pub reconnect_policy: ReconnectPolicy,
-}
-
-impl Default for UpstreamConnectorConfig {
-    fn default() -> Self {
-        Self {
-            client_config: RaknetClientConfig::default(),
-            reconnect_policy: ReconnectPolicy::default(),
-        }
-    }
 }
 
 impl UpstreamConnectorConfig {
@@ -184,16 +175,11 @@ impl UpstreamConnector {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RelayOverflowPolicy {
+    #[default]
     DropNewest,
     DisconnectSession,
-}
-
-impl Default for RelayOverflowPolicy {
-    fn default() -> Self {
-        Self::DropNewest
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -445,6 +431,17 @@ enum RelaySessionEvent {
         peer_id: PeerId,
         reason: RelaySessionCloseReason,
     },
+}
+
+struct RelaySessionRuntimeContext {
+    event_tx: mpsc::Sender<RelaySessionEvent>,
+    upstream_to_downstream_send: SendOptions,
+    runtime_config: RelayRuntimeConfig,
+    stop: Arc<AtomicBool>,
+    downstream_pending_packets: Arc<AtomicUsize>,
+    downstream_pending_bytes: Arc<AtomicUsize>,
+    upstream_pending_packets: Arc<AtomicUsize>,
+    upstream_pending_bytes: Arc<AtomicUsize>,
 }
 
 pub struct RaknetRelayProxy<P = PassthroughRelayPolicy> {
@@ -869,15 +866,17 @@ where
         let upstream_pending_packets = Arc::new(AtomicUsize::new(0));
         let upstream_pending_bytes = Arc::new(AtomicUsize::new(0));
 
-        let event_tx = self.session_event_tx.clone();
         let contract = Arc::clone(&self.contract);
-        let upstream_to_downstream_send = self.runtime_config.upstream_to_downstream_send;
-        let session_stop = Arc::clone(&stop);
-        let runtime_config = self.runtime_config;
-        let session_downstream_pending_packets = Arc::clone(&downstream_pending_packets);
-        let session_downstream_pending_bytes = Arc::clone(&downstream_pending_bytes);
-        let session_upstream_pending_packets = Arc::clone(&upstream_pending_packets);
-        let session_upstream_pending_bytes = Arc::clone(&upstream_pending_bytes);
+        let session_context = RelaySessionRuntimeContext {
+            event_tx: self.session_event_tx.clone(),
+            upstream_to_downstream_send: self.runtime_config.upstream_to_downstream_send,
+            runtime_config: self.runtime_config,
+            stop: Arc::clone(&stop),
+            downstream_pending_packets: Arc::clone(&downstream_pending_packets),
+            downstream_pending_bytes: Arc::clone(&downstream_pending_bytes),
+            upstream_pending_packets: Arc::clone(&upstream_pending_packets),
+            upstream_pending_bytes: Arc::clone(&upstream_pending_bytes),
+        };
 
         let join = tokio::spawn(async move {
             run_relay_session(
@@ -885,14 +884,7 @@ where
                 upstream_client,
                 contract,
                 command_rx,
-                event_tx,
-                upstream_to_downstream_send,
-                runtime_config,
-                session_stop,
-                session_downstream_pending_packets,
-                session_downstream_pending_bytes,
-                session_upstream_pending_packets,
-                session_upstream_pending_bytes,
+                session_context,
             )
             .await;
         });
@@ -1111,17 +1103,21 @@ async fn run_relay_session<P>(
     mut upstream: RaknetClient,
     contract: Arc<RelayContract<P>>,
     mut command_rx: mpsc::Receiver<RelaySessionCommand>,
-    event_tx: mpsc::Sender<RelaySessionEvent>,
-    upstream_to_downstream_send: SendOptions,
-    runtime_config: RelayRuntimeConfig,
-    stop: Arc<AtomicBool>,
-    downstream_pending_packets: Arc<AtomicUsize>,
-    downstream_pending_bytes: Arc<AtomicUsize>,
-    upstream_pending_packets: Arc<AtomicUsize>,
-    upstream_pending_bytes: Arc<AtomicUsize>,
+    context: RelaySessionRuntimeContext,
 ) where
     P: RelayPolicy,
 {
+    let RelaySessionRuntimeContext {
+        event_tx,
+        upstream_to_downstream_send,
+        runtime_config,
+        stop,
+        downstream_pending_packets,
+        downstream_pending_bytes,
+        upstream_pending_packets,
+        upstream_pending_bytes,
+    } = context;
+
     loop {
         if stop.load(Ordering::Relaxed) {
             let _ = upstream.disconnect(None).await;
