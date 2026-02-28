@@ -4,23 +4,23 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use raknet_rs::handshake::{
+use raknet_rust::handshake::{
     OfflinePacket, OpenConnectionRequest1, OpenConnectionRequest2, Request2ParsePath,
     UnconnectedPing,
 };
-use raknet_rs::protocol::connected::{
+use raknet_rust::protocol::connected::{
     ConnectedControlPacket, ConnectionRequest, NewIncomingConnection, SYSTEM_ADDRESS_COUNT,
 };
-use raknet_rs::protocol::constants::{
+use raknet_rust::protocol::constants::{
     DEFAULT_UNCONNECTED_MAGIC, DatagramFlags, RAKNET_PROTOCOL_VERSION,
 };
-use raknet_rs::protocol::datagram::{Datagram, DatagramHeader, DatagramPayload};
-use raknet_rs::protocol::frame::Frame;
-use raknet_rs::protocol::frame_header::FrameHeader;
-use raknet_rs::protocol::reliability::Reliability;
-use raknet_rs::protocol::sequence24::Sequence24;
-use raknet_rs::server::{PeerId, RaknetServer, RaknetServerEvent};
-use raknet_rs::transport::EventOverflowPolicy;
+use raknet_rust::protocol::datagram::{Datagram, DatagramHeader, DatagramPayload};
+use raknet_rust::protocol::frame::Frame;
+use raknet_rust::protocol::frame_header::FrameHeader;
+use raknet_rust::protocol::reliability::Reliability;
+use raknet_rust::protocol::sequence24::Sequence24;
+use raknet_rust::server::{PeerId, RaknetServer, RaknetServerEvent};
+use raknet_rust::transport::EventOverflowPolicy;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep, timeout};
 
