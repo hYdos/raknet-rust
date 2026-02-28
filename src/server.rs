@@ -1,10 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
 use tracing::{debug, info, warn};
 
+use crate::concurrency::{FastMap, fast_map};
 use crate::error::ConfigValidationError;
 use crate::handshake::OfflinePacket;
 use crate::protocol::reliability::Reliability;
@@ -179,8 +180,8 @@ struct PeerBinding {
 
 pub struct RaknetServer {
     runtime: ShardedRuntimeHandle,
-    peers_by_addr: HashMap<SocketAddr, PeerBinding>,
-    addrs_by_peer: HashMap<PeerId, SocketAddr>,
+    peers_by_addr: FastMap<SocketAddr, PeerBinding>,
+    addrs_by_peer: FastMap<PeerId, SocketAddr>,
     pending_events: VecDeque<RaknetServerEvent>,
     next_peer_id: u64,
 }
@@ -205,20 +206,22 @@ impl RaknetServer {
         let runtime = spawn_sharded_runtime(transport_config, runtime_config).await?;
         Ok(Self {
             runtime,
-            peers_by_addr: HashMap::new(),
-            addrs_by_peer: HashMap::new(),
+            peers_by_addr: fast_map(),
+            addrs_by_peer: fast_map(),
             pending_events: VecDeque::new(),
             next_peer_id: 1,
         })
     }
 
     pub fn peer_addr(&self, peer_id: PeerId) -> Option<SocketAddr> {
-        self.addrs_by_peer.get(&peer_id).copied()
+        self.addrs_by_peer.get(&peer_id).map(|addr| *addr)
     }
 
     pub fn peer_shard(&self, peer_id: PeerId) -> Option<usize> {
-        let addr = self.addrs_by_peer.get(&peer_id)?;
-        self.peers_by_addr.get(addr).map(|binding| binding.shard_id)
+        let addr = self.addrs_by_peer.get(&peer_id).map(|addr| *addr)?;
+        self.peers_by_addr
+            .get(&addr)
+            .map(|binding| binding.shard_id)
     }
 
     pub fn peer_id_for_addr(&self, addr: SocketAddr) -> Option<PeerId> {
@@ -460,9 +463,11 @@ impl RaknetServer {
             ShardedRuntimeEvent::WorkerStopped { shard_id } => {
                 warn!(shard_id, "runtime worker stopped");
                 let mut disconnected = Vec::new();
-                for (addr, binding) in &self.peers_by_addr {
+                for peer in self.peers_by_addr.iter() {
+                    let addr = *peer.key();
+                    let binding = *peer.value();
                     if binding.shard_id == shard_id {
-                        disconnected.push((*addr, binding.peer_id));
+                        disconnected.push((addr, binding.peer_id));
                     }
                 }
                 for (addr, peer_id) in disconnected {
@@ -487,7 +492,7 @@ impl RaknetServer {
     }
 
     fn ensure_peer(&mut self, addr: SocketAddr, shard_id: usize) -> (PeerId, bool) {
-        if let Some(binding) = self.peers_by_addr.get_mut(&addr) {
+        if let Some(mut binding) = self.peers_by_addr.get_mut(&addr) {
             if binding.shard_id != shard_id {
                 binding.shard_id = shard_id;
             }
@@ -503,7 +508,7 @@ impl RaknetServer {
     }
 
     fn remove_peer(&mut self, addr: SocketAddr) -> Option<PeerId> {
-        let binding = self.peers_by_addr.remove(&addr)?;
+        let (_, binding) = self.peers_by_addr.remove(&addr)?;
         self.addrs_by_peer.remove(&binding.peer_id);
         Some(binding.peer_id)
     }
@@ -512,7 +517,7 @@ impl RaknetServer {
         let addr = self
             .addrs_by_peer
             .get(&peer_id)
-            .copied()
+            .map(|entry| *entry)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "peer id not found"))?;
         let shard_id = self
             .peers_by_addr

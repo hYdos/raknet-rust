@@ -1,7 +1,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -9,6 +9,7 @@ use bytes::Bytes;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::concurrency::FastMutex;
 use crate::server::{PeerDisconnectReason, PeerId, SendOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,22 +131,20 @@ pub(crate) enum ConnectionCommand {
 #[derive(Debug)]
 pub(crate) struct ConnectionSharedState {
     closed: AtomicBool,
-    close_reason: Mutex<Option<ConnectionCloseReason>>,
+    close_reason: FastMutex<Option<ConnectionCloseReason>>,
 }
 
 impl ConnectionSharedState {
     pub(crate) fn new() -> Self {
         Self {
             closed: AtomicBool::new(false),
-            close_reason: Mutex::new(None),
+            close_reason: FastMutex::new(None),
         }
     }
 
     pub(crate) fn mark_closed(&self, reason: ConnectionCloseReason) {
         self.closed.store(true, Ordering::Release);
-        if let Ok(mut guard) = self.close_reason.lock() {
-            *guard = Some(reason);
-        }
+        *self.close_reason.lock() = Some(reason);
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -153,10 +152,7 @@ impl ConnectionSharedState {
     }
 
     pub(crate) fn close_reason(&self) -> Option<ConnectionCloseReason> {
-        self.close_reason
-            .lock()
-            .ok()
-            .and_then(|guard| (*guard).clone())
+        self.close_reason.lock().clone()
     }
 }
 

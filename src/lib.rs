@@ -1,4 +1,5 @@
 pub mod client;
+mod concurrency;
 pub mod connection;
 pub mod error;
 pub mod event;
