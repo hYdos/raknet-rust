@@ -1,0 +1,33 @@
+name: Soak (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: "Session count"
+        required: true
+        default: "512"
+      ticks:
+        description: "Tick count"
+        required: true
+        default: "2000"
+      payload_bytes:
+        description: "Payload bytes"
+        required: true
+        default: "180"
+
+jobs:
+  soak:
+    name: Long soak profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: raknet_soak (manual profile)
+        run: >
+          cargo run --release --example raknet_soak --
+          --sessions=${{ github.event.inputs.sessions }}
+          --ticks=${{ github.event.inputs.ticks }}
+          --payload-bytes=${{ github.event.inputs.payload_bytes }}
