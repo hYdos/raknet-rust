@@ -12,6 +12,7 @@ use sha2::Sha256;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 use crate::error::DecodeError;
 use crate::handshake::{
@@ -49,6 +50,7 @@ const RECV_PATH_MAX_RESEND_DATAGRAMS: usize = 6;
 const COOKIE_KEY_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
+type SecretCookieKey = Zeroizing<[u8; COOKIE_KEY_LEN]>;
 
 #[derive(Debug)]
 pub struct ConnectedFrameDelivery {
@@ -289,8 +291,8 @@ pub struct TransportServer {
     advertisement_bytes: Bytes,
     rate_limiter: RateLimiter,
     proxy_router: Option<Arc<dyn ProxyRouter>>,
-    cookie_key_current: [u8; COOKIE_KEY_LEN],
-    cookie_key_previous: Option<[u8; COOKIE_KEY_LEN]>,
+    cookie_key_current: SecretCookieKey,
+    cookie_key_previous: Option<SecretCookieKey>,
     next_cookie_rotation: Instant,
     sessions: HashMap<SocketAddr, Session>,
     session_pipelines: HashMap<SocketAddr, SessionPipeline>,
@@ -472,7 +474,7 @@ impl TransportServer {
             rate_limiter.add_exception(*ip);
         }
         let now = Instant::now();
-        let cookie_key_current = random_cookie_key();
+        let cookie_key_current = SecretCookieKey::new(random_cookie_key());
         let next_cookie_rotation = now + config.cookie_rotation_interval;
         let advertisement_bytes = Bytes::copy_from_slice(config.advertisement.as_bytes());
 
@@ -2193,14 +2195,15 @@ impl TransportServer {
             return;
         }
 
-        self.cookie_key_previous = Some(self.cookie_key_current);
-        self.cookie_key_current = random_cookie_key();
+        let next_key = SecretCookieKey::new(random_cookie_key());
+        let previous_key = std::mem::replace(&mut self.cookie_key_current, next_key);
+        self.cookie_key_previous = Some(previous_key);
         self.next_cookie_rotation = now + self.config.cookie_rotation_interval;
         self.cookie_rotations = self.cookie_rotations.saturating_add(1);
     }
 
     fn generate_cookie(&self, addr: SocketAddr) -> u32 {
-        self.compute_cookie_for_key(addr, &self.cookie_key_current)
+        self.compute_cookie_for_key(addr, self.cookie_key_current.as_ref())
     }
 
     fn verify_cookie(&self, addr: SocketAddr, cookie: Option<u32>) -> bool {
@@ -2208,12 +2211,12 @@ impl TransportServer {
             return false;
         };
 
-        if self.compute_cookie_for_key(addr, &self.cookie_key_current) == cookie {
+        if self.compute_cookie_for_key(addr, self.cookie_key_current.as_ref()) == cookie {
             return true;
         }
 
-        if let Some(previous_key) = &self.cookie_key_previous
-            && self.compute_cookie_for_key(addr, previous_key) == cookie
+        if let Some(previous_key) = self.cookie_key_previous.as_ref()
+            && self.compute_cookie_for_key(addr, previous_key.as_ref()) == cookie
         {
             return true;
         }
@@ -2221,7 +2224,7 @@ impl TransportServer {
         false
     }
 
-    fn compute_cookie_for_key(&self, addr: SocketAddr, key: &[u8; COOKIE_KEY_LEN]) -> u32 {
+    fn compute_cookie_for_key(&self, addr: SocketAddr, key: &[u8]) -> u32 {
         let mut mac = HmacSha256::new_from_slice(key).expect("HMAC supports arbitrary key lengths");
         update_mac_with_socket_addr(&mut mac, addr);
         update_mac_with_socket_addr(&mut mac, self.config.bind_addr);
@@ -2715,12 +2718,22 @@ mod tests {
             .parse::<SocketAddr>()
             .expect("valid socket addr");
 
-        let original_key = server.cookie_key_current;
+        let mut original_key = [0u8; super::COOKIE_KEY_LEN];
+        original_key.copy_from_slice(server.cookie_key_current.as_ref());
         let old_cookie = server.generate_cookie(addr);
         server.rotate_cookie_keys_if_needed(Instant::now() + Duration::from_secs(2));
 
         assert_eq!(server.cookie_rotations, 1);
-        assert_eq!(server.cookie_key_previous, Some(original_key));
+        let previous_key = server.cookie_key_previous.as_ref().map(|key| {
+            let mut value = [0u8; super::COOKIE_KEY_LEN];
+            value.copy_from_slice(key.as_ref());
+            value
+        });
+        assert_eq!(
+            previous_key,
+            Some(original_key),
+            "rotating cookies must retain previous key for grace period"
+        );
         assert!(server.verify_cookie(addr, Some(old_cookie)));
     }
 

@@ -143,6 +143,14 @@ impl SplitAssembler {
         });
         dropped
     }
+
+    pub fn drain_buffered_parts(&mut self) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        for (_, entry) in self.entries.drain() {
+            out.extend(entry.parts.into_iter().flatten());
+        }
+        out
+    }
 }
 
 #[cfg(test)]

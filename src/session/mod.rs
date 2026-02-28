@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use zeroize::Zeroize;
 
 use ack_queue::AckQueue;
 use ordering_channels::{OrderedResult, OrderingChannels, SequencedResult};
@@ -212,6 +213,7 @@ pub struct Session {
     outgoing_queue_max_bytes: usize,
     outgoing_queue_soft_ratio: f64,
     backpressure_mode: BackpressureMode,
+    best_effort_zeroize_dropped_payloads: bool,
     disconnect_requested_by_backpressure: bool,
     metrics: SessionMetrics,
 }
@@ -319,6 +321,7 @@ impl Session {
             outgoing_queue_max_bytes: tunables.outgoing_queue_max_bytes.max(1),
             outgoing_queue_soft_ratio: tunables.outgoing_queue_soft_ratio.clamp(0.05, 0.99),
             backpressure_mode: tunables.backpressure_mode,
+            best_effort_zeroize_dropped_payloads: tunables.best_effort_zeroize_dropped_payloads,
             disconnect_requested_by_backpressure: false,
             metrics: SessionMetrics::default(),
         };
@@ -727,12 +730,18 @@ impl Session {
         ) {
             BackpressureAction::Allow => {}
             BackpressureAction::Drop => {
+                if self.best_effort_zeroize_dropped_payloads {
+                    let _ = best_effort_zeroize_bytes(payload);
+                }
                 self.metrics.outgoing_queue_drops =
                     self.metrics.outgoing_queue_drops.saturating_add(1);
                 self.metrics.backpressure_drops = self.metrics.backpressure_drops.saturating_add(1);
                 return QueuePayloadResult::Dropped;
             }
             BackpressureAction::Defer => {
+                if self.best_effort_zeroize_dropped_payloads {
+                    let _ = best_effort_zeroize_bytes(payload);
+                }
                 self.metrics.outgoing_queue_defers =
                     self.metrics.outgoing_queue_defers.saturating_add(1);
                 self.metrics.backpressure_delays =
@@ -740,6 +749,9 @@ impl Session {
                 return QueuePayloadResult::Deferred;
             }
             BackpressureAction::Disconnect => {
+                if self.best_effort_zeroize_dropped_payloads {
+                    let _ = best_effort_zeroize_bytes(payload);
+                }
                 self.metrics.outgoing_queue_disconnects =
                     self.metrics.outgoing_queue_disconnects.saturating_add(1);
                 self.metrics.backpressure_disconnects =
@@ -1303,6 +1315,29 @@ impl Session {
         BackpressureAction::Allow
     }
 
+    fn best_effort_zeroize_buffered_payloads(&mut self) {
+        for queued in self.outgoing_heap.drain() {
+            let _ = best_effort_zeroize_bytes(queued.frame.payload);
+        }
+
+        for tracked in self.sent_datagrams.values_mut() {
+            if let DatagramPayload::Frames(frames) = &mut tracked.datagram.payload {
+                for frame in frames {
+                    let payload = std::mem::take(&mut frame.payload);
+                    let _ = best_effort_zeroize_bytes(payload);
+                }
+            }
+        }
+
+        for frame in self.ordering.drain_pending_ordered_frames() {
+            let _ = best_effort_zeroize_bytes(frame.payload);
+        }
+
+        for part in self.split_assembler.drain_buffered_parts() {
+            let _ = best_effort_zeroize_bytes(part);
+        }
+    }
+
     fn can_emit_new_reliable_datagram(&self) -> bool {
         let in_flight = self.sent_datagrams.len() as f64;
         in_flight < self.congestion_window_packets.max(1.0).floor()
@@ -1484,6 +1519,24 @@ impl Session {
             }
             seq = seq.next();
         }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.best_effort_zeroize_dropped_payloads {
+            self.best_effort_zeroize_buffered_payloads();
+        }
+    }
+}
+
+fn best_effort_zeroize_bytes(payload: Bytes) -> bool {
+    match payload.try_into_mut() {
+        Ok(mut writable) => {
+            writable.as_mut().zeroize();
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -2314,5 +2367,25 @@ mod tests {
         let snapshot = session.metrics_snapshot();
         assert_eq!(snapshot.ack_out_datagrams, 1);
         assert_eq!(snapshot.nack_out_datagrams, 1);
+    }
+
+    #[test]
+    fn best_effort_zeroize_bytes_reports_success_for_unique_buffer() {
+        let payload = Bytes::from(vec![0xAA, 0xBB, 0xCC]);
+        assert!(
+            super::best_effort_zeroize_bytes(payload),
+            "uniquely-owned buffer should be writable for zeroize"
+        );
+    }
+
+    #[test]
+    fn best_effort_zeroize_bytes_reports_failure_for_shared_buffer() {
+        let payload = Bytes::from(vec![0xAA, 0xBB, 0xCC]);
+        let shared = payload.clone();
+        assert!(
+            !super::best_effort_zeroize_bytes(payload),
+            "shared buffer cannot be zeroized in-place without unique ownership"
+        );
+        drop(shared);
     }
 }

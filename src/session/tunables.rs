@@ -170,6 +170,9 @@ pub struct SessionTunables {
     pub outgoing_queue_max_frames: usize,
     pub outgoing_queue_max_bytes: usize,
     pub outgoing_queue_soft_ratio: f64,
+    /// Best-effort zeroize for payload buffers that are dropped or abandoned
+    /// before successful delivery. This may add CPU cost under heavy shedding.
+    pub best_effort_zeroize_dropped_payloads: bool,
 }
 
 impl Default for SessionTunables {
@@ -220,6 +223,7 @@ impl Default for SessionTunables {
             outgoing_queue_max_frames: 8192,
             outgoing_queue_max_bytes: 8 * 1024 * 1024,
             outgoing_queue_soft_ratio: 0.85,
+            best_effort_zeroize_dropped_payloads: false,
         }
     }
 }

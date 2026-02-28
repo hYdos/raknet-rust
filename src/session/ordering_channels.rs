@@ -111,6 +111,15 @@ impl OrderingChannels {
         SequencedResult::Accept
     }
 
+    pub fn drain_pending_ordered_frames(&mut self) -> Vec<Frame> {
+        let mut out = Vec::new();
+        for state in &mut self.channels {
+            let pending = std::mem::take(&mut state.pending_ordered);
+            out.extend(pending.into_values());
+        }
+        out
+    }
+
     fn channel_state_mut(&mut self, channel: u8) -> &mut ChannelState {
         let idx = channel as usize;
         if idx >= self.channels.len() {

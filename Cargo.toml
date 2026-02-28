@@ -15,6 +15,7 @@ getrandom = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
 tracing = "0.1"
+zeroize = "1.8"
 
 [dev-dependencies]
 proptest = "1.6"
