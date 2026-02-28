@@ -38,7 +38,10 @@ pub struct ShardedRuntimeConfig {
 impl Default for ShardedRuntimeConfig {
     fn default() -> Self {
         Self {
-            shard_count: 1,
+            shard_count: std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(1)
+                .max(1),
             outbound_tick_interval: Duration::from_millis(10),
             metrics_emit_interval: Duration::from_millis(1000),
             event_queue_capacity: 4096,
