@@ -98,6 +98,7 @@ pub enum TransportEvent {
     },
     ConnectedFrames {
         addr: SocketAddr,
+        client_guid: Option<u64>,
         frames: Vec<ConnectedFrameDelivery>,
         frame_count: usize,
         receipts: ReceiptProgress,
@@ -237,6 +238,7 @@ enum PendingHandshakeStage {
 struct PendingHandshake {
     mtu: u16,
     cookie: Option<u32>,
+    client_guid: Option<u64>,
     stage: PendingHandshakeStage,
     expires_at: Instant,
 }
@@ -869,6 +871,14 @@ impl TransportServer {
             self.sessions_started_total = self.sessions_started_total.saturating_add(1);
         }
 
+        let client_guid = if became_connected {
+            self.pending_handshakes
+                .get(&addr)
+                .and_then(|pending| pending.client_guid)
+        } else {
+            None
+        };
+
         if self
             .sessions
             .get(&addr)
@@ -888,6 +898,7 @@ impl TransportServer {
         self.bytes_forwarded_total = self.bytes_forwarded_total.saturating_add(forwarded_bytes);
         Ok(TransportEvent::ConnectedFrames {
             addr,
+            client_guid,
             frames,
             frame_count,
             receipts,
@@ -1435,6 +1446,7 @@ impl TransportServer {
                     PendingHandshake {
                         mtu,
                         cookie,
+                        client_guid: None,
                         stage: PendingHandshakeStage::AwaitingRequest2,
                         expires_at: now + self.config.handshake_req1_req2_timeout(),
                     },
@@ -1664,6 +1676,7 @@ impl TransportServer {
                     PendingHandshake {
                         mtu,
                         cookie: pending.cookie,
+                        client_guid: Some(req2.client_guid),
                         stage: PendingHandshakeStage::AwaitingConnectionRequest,
                         expires_at: now + self.config.handshake_reply2_connect_timeout(),
                     },
@@ -2863,6 +2876,7 @@ mod tests {
             PendingHandshake {
                 mtu: 1492,
                 cookie: None,
+                client_guid: None,
                 stage: PendingHandshakeStage::AwaitingRequest2,
                 expires_at: now - Duration::from_millis(1),
             },
@@ -2907,6 +2921,7 @@ mod tests {
             PendingHandshake {
                 mtu: 1492,
                 cookie: None,
+                client_guid: None,
                 stage: PendingHandshakeStage::AwaitingConnectionRequest,
                 expires_at: now - Duration::from_millis(1),
             },

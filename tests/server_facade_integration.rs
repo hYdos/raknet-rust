@@ -466,9 +466,11 @@ async fn peer_connected_precedes_packet_events_and_is_not_re_emitted() -> io::Re
         RaknetServerEvent::PeerConnected {
             peer_id,
             addr,
+            client_guid,
             shard_id,
         } => {
             assert_eq!(shard_id, 0);
+            assert_eq!(client_guid, 0xA11CE001);
             (peer_id, addr)
         }
         other => panic!("expected PeerConnected as first event, got {other:?}"),

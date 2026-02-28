@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 
 use bytes::Bytes;
@@ -62,6 +62,7 @@ pub enum RaknetServerEvent {
     PeerConnected {
         peer_id: PeerId,
         addr: SocketAddr,
+        client_guid: u64,
         shard_id: usize,
     },
     PeerDisconnected {
@@ -132,6 +133,7 @@ impl RaknetServerEvent {
 pub struct ConnectEvent {
     pub peer_id: PeerId,
     pub addr: SocketAddr,
+    pub client_guid: u64,
     pub shard_id: usize,
 }
 
@@ -236,6 +238,7 @@ impl<'a> ServerFacade<'a> {
             RaknetServerEvent::PeerConnected {
                 peer_id,
                 addr,
+                client_guid,
                 shard_id,
             } => {
                 if let Some(handler) = self.on_connect.as_mut() {
@@ -244,6 +247,7 @@ impl<'a> ServerFacade<'a> {
                         ConnectEvent {
                             peer_id,
                             addr,
+                            client_guid,
                             shard_id,
                         },
                     )
@@ -306,6 +310,144 @@ impl<'a> ServerFacade<'a> {
         }
 
         Ok(())
+    }
+}
+
+/// Event-driven callback surface that mirrors RakLibInterface-style hooks.
+///
+/// This trait is intentionally event-driven and is fed from `RaknetServerEvent`.
+/// All methods are optional and default to no-op.
+pub trait EventFacadeHandler {
+    fn on_connect<'a>(
+        &'a mut self,
+        _session_id: u64,
+        _addr: IpAddr,
+        _port: u16,
+        _client_guid: u64,
+    ) -> ServerHookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn on_disconnect<'a>(
+        &'a mut self,
+        _session_id: u64,
+        _reason: PeerDisconnectReason,
+    ) -> ServerHookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn on_packet<'a>(&'a mut self, _session_id: u64, _payload: Bytes) -> ServerHookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn on_ack<'a>(&'a mut self, _session_id: u64, _receipt_id: u64) -> ServerHookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn on_metrics<'a>(
+        &'a mut self,
+        _shard_id: usize,
+        _snapshot: TransportMetricsSnapshot,
+        _dropped_non_critical_events: u64,
+    ) -> ServerHookFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub async fn dispatch_event_facade<H: EventFacadeHandler>(
+    handler: &mut H,
+    event: RaknetServerEvent,
+) -> io::Result<()> {
+    match event {
+        RaknetServerEvent::PeerConnected {
+            peer_id,
+            addr,
+            client_guid,
+            ..
+        } => {
+            handler
+                .on_connect(peer_id.as_u64(), addr.ip(), addr.port(), client_guid)
+                .await?;
+        }
+        RaknetServerEvent::PeerDisconnected {
+            peer_id, reason, ..
+        } => {
+            handler.on_disconnect(peer_id.as_u64(), reason).await?;
+        }
+        RaknetServerEvent::Packet {
+            peer_id, payload, ..
+        } => {
+            handler.on_packet(peer_id.as_u64(), payload).await?;
+        }
+        RaknetServerEvent::ReceiptAcked {
+            peer_id,
+            receipt_id,
+            ..
+        } => {
+            handler.on_ack(peer_id.as_u64(), receipt_id).await?;
+        }
+        RaknetServerEvent::Metrics {
+            shard_id,
+            snapshot,
+            dropped_non_critical_events,
+        } => {
+            handler
+                .on_metrics(shard_id, *snapshot, dropped_non_critical_events)
+                .await?;
+        }
+        RaknetServerEvent::OfflinePacket { .. }
+        | RaknetServerEvent::PeerRateLimited { .. }
+        | RaknetServerEvent::SessionLimitReached { .. }
+        | RaknetServerEvent::ProxyDropped { .. }
+        | RaknetServerEvent::DecodeError { .. }
+        | RaknetServerEvent::WorkerError { .. }
+        | RaknetServerEvent::WorkerStopped { .. } => {}
+    }
+
+    Ok(())
+}
+
+pub struct EventFacade<'a, H: EventFacadeHandler> {
+    server: &'a mut RaknetServer,
+    handler: &'a mut H,
+}
+
+impl<'a, H: EventFacadeHandler> EventFacade<'a, H> {
+    pub fn new(server: &'a mut RaknetServer, handler: &'a mut H) -> Self {
+        Self { server, handler }
+    }
+
+    pub async fn next(&mut self) -> io::Result<bool> {
+        let Some(event) = self.server.next_event().await else {
+            return Ok(false);
+        };
+        self.dispatch(event).await?;
+        Ok(true)
+    }
+
+    pub async fn run(&mut self) -> io::Result<()> {
+        while self.next().await? {}
+        Ok(())
+    }
+
+    pub fn server(&self) -> &RaknetServer {
+        self.server
+    }
+
+    pub fn server_mut(&mut self) -> &mut RaknetServer {
+        self.server
+    }
+
+    pub fn handler(&self) -> &H {
+        self.handler
+    }
+
+    pub fn handler_mut(&mut self) -> &mut H {
+        self.handler
+    }
+
+    async fn dispatch(&mut self, event: RaknetServerEvent) -> io::Result<()> {
+        dispatch_event_facade(self.handler, event).await
     }
 }
 
@@ -380,6 +522,13 @@ impl RaknetServer {
 
     pub fn facade(&mut self) -> ServerFacade<'_> {
         ServerFacade::new(self)
+    }
+
+    pub fn event_facade<'a, H: EventFacadeHandler>(
+        &'a mut self,
+        handler: &'a mut H,
+    ) -> EventFacade<'a, H> {
+        EventFacade::new(self, handler)
     }
 
     pub async fn start_with_configs(
@@ -553,46 +702,61 @@ impl RaknetServer {
                 }
                 TransportEvent::ConnectedFrames {
                     addr,
+                    client_guid,
                     frames,
                     receipts,
                     ..
                 } => {
-                    let (peer_id, is_new) = self.ensure_peer(addr, shard_id);
-                    if is_new {
-                        info!(
-                            peer_id = peer_id.as_u64(),
+                    let has_frames = !frames.is_empty();
+                    let has_receipts = !receipts.acked_receipt_ids.is_empty();
+
+                    if client_guid.is_none() && !has_frames && !has_receipts {
+                        debug!(
                             %addr,
                             shard_id,
-                            "peer connected"
+                            "ignoring pre-connect transport event without frames/receipts"
                         );
-                        self.pending_events
-                            .push_back(RaknetServerEvent::PeerConnected {
-                                peer_id,
-                                addr,
+                    } else {
+                        let (peer_id, is_new) = self.ensure_peer(addr, shard_id);
+                        if is_new {
+                            let client_guid = client_guid.unwrap_or(peer_id.as_u64());
+                            info!(
+                                peer_id = peer_id.as_u64(),
+                                %addr,
+                                client_guid,
                                 shard_id,
-                            });
-                    }
+                                "peer connected"
+                            );
+                            self.pending_events
+                                .push_back(RaknetServerEvent::PeerConnected {
+                                    peer_id,
+                                    addr,
+                                    client_guid,
+                                    shard_id,
+                                });
+                        }
 
-                    for frame in frames {
-                        self.pending_events.push_back(RaknetServerEvent::Packet {
-                            peer_id,
-                            addr,
-                            payload: frame.payload,
-                            reliability: frame.reliability,
-                            reliable_index: frame.reliable_index,
-                            sequence_index: frame.sequence_index,
-                            ordering_index: frame.ordering_index,
-                            ordering_channel: frame.ordering_channel,
-                        });
-                    }
-
-                    for receipt_id in receipts.acked_receipt_ids {
-                        self.pending_events
-                            .push_back(RaknetServerEvent::ReceiptAcked {
+                        for frame in frames {
+                            self.pending_events.push_back(RaknetServerEvent::Packet {
                                 peer_id,
                                 addr,
-                                receipt_id,
+                                payload: frame.payload,
+                                reliability: frame.reliability,
+                                reliable_index: frame.reliable_index,
+                                sequence_index: frame.sequence_index,
+                                ordering_index: frame.ordering_index,
+                                ordering_channel: frame.ordering_channel,
                             });
+                        }
+
+                        for receipt_id in receipts.acked_receipt_ids {
+                            self.pending_events
+                                .push_back(RaknetServerEvent::ReceiptAcked {
+                                    peer_id,
+                                    addr,
+                                    receipt_id,
+                                });
+                        }
                     }
                 }
                 TransportEvent::RateLimited { addr } => {
@@ -721,8 +885,13 @@ fn invalid_config_io_error(error: ConfigValidationError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerId, RaknetServer, RaknetServerBuilder};
-    use crate::transport::{ShardedRuntimeConfig, TransportConfig};
+    use super::{
+        EventFacadeHandler, PeerDisconnectReason, PeerId, RaknetServer, RaknetServerBuilder,
+        RaknetServerEvent, ServerHookFuture, dispatch_event_facade,
+    };
+    use crate::protocol::reliability::Reliability;
+    use crate::transport::{ShardedRuntimeConfig, TransportConfig, TransportMetricsSnapshot};
+    use bytes::Bytes;
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -758,5 +927,166 @@ mod tests {
             Ok(_) => panic!("invalid config must fail before runtime start"),
             Err(err) => assert_eq!(err.kind(), io::ErrorKind::InvalidInput),
         }
+    }
+
+    #[derive(Default)]
+    struct CountingEventHandler {
+        connect_calls: usize,
+        disconnect_calls: usize,
+        packet_calls: usize,
+        ack_calls: usize,
+        metrics_calls: usize,
+        last_connect: Option<(u64, IpAddr, u16, u64)>,
+        last_disconnect: Option<(u64, PeerDisconnectReason)>,
+        last_packet: Option<(u64, Bytes)>,
+        last_ack: Option<(u64, u64)>,
+        last_metrics: Option<(usize, TransportMetricsSnapshot, u64)>,
+    }
+
+    impl EventFacadeHandler for CountingEventHandler {
+        fn on_connect<'a>(
+            &'a mut self,
+            session_id: u64,
+            addr: IpAddr,
+            port: u16,
+            client_guid: u64,
+        ) -> ServerHookFuture<'a> {
+            self.connect_calls = self.connect_calls.saturating_add(1);
+            self.last_connect = Some((session_id, addr, port, client_guid));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn on_disconnect<'a>(
+            &'a mut self,
+            session_id: u64,
+            reason: PeerDisconnectReason,
+        ) -> ServerHookFuture<'a> {
+            self.disconnect_calls = self.disconnect_calls.saturating_add(1);
+            self.last_disconnect = Some((session_id, reason));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn on_packet<'a>(&'a mut self, session_id: u64, payload: Bytes) -> ServerHookFuture<'a> {
+            self.packet_calls = self.packet_calls.saturating_add(1);
+            self.last_packet = Some((session_id, payload));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn on_ack<'a>(&'a mut self, session_id: u64, receipt_id: u64) -> ServerHookFuture<'a> {
+            self.ack_calls = self.ack_calls.saturating_add(1);
+            self.last_ack = Some((session_id, receipt_id));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn on_metrics<'a>(
+            &'a mut self,
+            shard_id: usize,
+            snapshot: TransportMetricsSnapshot,
+            dropped_non_critical_events: u64,
+        ) -> ServerHookFuture<'a> {
+            self.metrics_calls = self.metrics_calls.saturating_add(1);
+            self.last_metrics = Some((shard_id, snapshot, dropped_non_critical_events));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_facade_maps_callbacks() -> io::Result<()> {
+        let mut handler = CountingEventHandler::default();
+        let peer_id = PeerId::from_u64(77);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)), 19132);
+        let payload = Bytes::from_static(b"\x01\x02event");
+        let metrics = TransportMetricsSnapshot {
+            packets_forwarded_total: 33,
+            bytes_forwarded_total: 1200,
+            ..TransportMetricsSnapshot::default()
+        };
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::PeerConnected {
+                peer_id,
+                addr,
+                client_guid: 0xAABB_CCDD_EEFF_0011,
+                shard_id: 2,
+            },
+        )
+        .await?;
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::Packet {
+                peer_id,
+                addr,
+                payload: payload.clone(),
+                reliability: Reliability::ReliableOrdered,
+                reliable_index: None,
+                sequence_index: None,
+                ordering_index: None,
+                ordering_channel: None,
+            },
+        )
+        .await?;
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::ReceiptAcked {
+                peer_id,
+                addr,
+                receipt_id: 9001,
+            },
+        )
+        .await?;
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::Metrics {
+                shard_id: 2,
+                snapshot: Box::new(metrics),
+                dropped_non_critical_events: 5,
+            },
+        )
+        .await?;
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::PeerDisconnected {
+                peer_id,
+                addr,
+                reason: PeerDisconnectReason::Requested,
+            },
+        )
+        .await?;
+
+        dispatch_event_facade(
+            &mut handler,
+            RaknetServerEvent::WorkerStopped { shard_id: 0 },
+        )
+        .await?;
+
+        assert_eq!(handler.connect_calls, 1);
+        assert_eq!(handler.packet_calls, 1);
+        assert_eq!(handler.ack_calls, 1);
+        assert_eq!(handler.metrics_calls, 1);
+        assert_eq!(handler.disconnect_calls, 1);
+        assert_eq!(
+            handler.last_connect,
+            Some((77, addr.ip(), addr.port(), 0xAABB_CCDD_EEFF_0011))
+        );
+        assert_eq!(handler.last_packet, Some((77, payload)));
+        assert_eq!(handler.last_ack, Some((77, 9001)));
+        let (metrics_shard, metrics_snapshot, metrics_dropped) = handler
+            .last_metrics
+            .expect("metrics callback should store last snapshot");
+        assert_eq!(metrics_shard, 2);
+        assert_eq!(metrics_dropped, 5);
+        assert_eq!(metrics_snapshot.packets_forwarded_total, 33);
+        assert_eq!(metrics_snapshot.bytes_forwarded_total, 1200);
+        assert_eq!(
+            handler.last_disconnect,
+            Some((77, PeerDisconnectReason::Requested))
+        );
+
+        Ok(())
     }
 }

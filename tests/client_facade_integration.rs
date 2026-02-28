@@ -92,10 +92,12 @@ async fn wait_for_server_peer_connected(server: &mut RaknetServer) -> (PeerId, S
         if let RaknetServerEvent::PeerConnected {
             peer_id,
             addr,
+            client_guid,
             shard_id,
         } = next_non_metrics_server_event(server).await
         {
             assert_eq!(shard_id, 0, "single-shard server must report shard 0");
+            assert_ne!(client_guid, 0, "client_guid must be populated");
             return (peer_id, addr);
         }
     }
