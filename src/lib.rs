@@ -13,7 +13,7 @@ pub mod telemetry;
 pub mod transport;
 
 pub use connection::{
-    Connection, ConnectionCloseReason, ConnectionId, ConnectionMetadata, RecvError,
+    Connection, ConnectionCloseReason, ConnectionId, ConnectionIo, ConnectionMetadata, RecvError,
 };
 pub use error::{ConfigValidationError, DecodeError, EncodeError};
 pub use listener::{Listener, ListenerMetadata};

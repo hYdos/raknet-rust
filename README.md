@@ -28,7 +28,7 @@ Basic server:
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use raknet_rust::server::{RaknetServer, RaknetServerEvent};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 19132);
     let mut server = RaknetServer::bind(bind).await?;
@@ -49,7 +49,7 @@ Basic client:
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use raknet_rust::client::{RaknetClient, RaknetClientEvent};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19132);
     let mut client = RaknetClient::connect(addr).await?;
@@ -69,9 +69,9 @@ async fn main() -> std::io::Result<()> {
 
 ## Observability
 
-- Runtime tarafi `tracing` event'leri uretir (baglanti, disconnect, decode error, handshake reject/timeout).
-- Uygulamada log almak icin bir subscriber kurman yeterli (ornek: `tracing-subscriber`).
-- Prometheus format export icin `telemetry::TelemetryExporter` kullanabilirsin:
+- The runtime emits `tracing` events (connect, disconnect, decode error, handshake reject/timeout).
+- To collect logs in your application, configure a subscriber (for example, `tracing-subscriber`).
+- For Prometheus format export, use `telemetry::TelemetryExporter`:
   - `exporter.ingest_server_event(&event)`
   - `let body = exporter.render_prometheus()`
 
