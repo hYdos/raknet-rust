@@ -68,6 +68,8 @@ struct SessionMetrics {
     sequenced_missing_index_drops: u64,
     reliable_sent_datagrams: u64,
     resent_datagrams: u64,
+    ack_out_datagrams: u64,
+    nack_out_datagrams: u64,
     acked_datagrams: u64,
     nacked_datagrams: u64,
     split_ttl_drops: u64,
@@ -90,6 +92,8 @@ pub struct SessionMetricsSnapshot {
     pub sequenced_missing_index_drops: u64,
     pub reliable_sent_datagrams: u64,
     pub resent_datagrams: u64,
+    pub ack_out_datagrams: u64,
+    pub nack_out_datagrams: u64,
     pub acked_datagrams: u64,
     pub nacked_datagrams: u64,
     pub split_ttl_drops: u64,
@@ -414,6 +418,8 @@ impl Session {
             sequenced_missing_index_drops: self.metrics.sequenced_missing_index_drops,
             reliable_sent_datagrams: self.metrics.reliable_sent_datagrams,
             resent_datagrams: self.metrics.resent_datagrams,
+            ack_out_datagrams: self.metrics.ack_out_datagrams,
+            nack_out_datagrams: self.metrics.nack_out_datagrams,
             acked_datagrams: self.metrics.acked_datagrams,
             nacked_datagrams: self.metrics.nacked_datagrams,
             split_ttl_drops: self.metrics.split_ttl_drops,
@@ -614,6 +620,7 @@ impl Session {
             return None;
         }
         self.next_ack_flush_at = now + self.ack_flush_interval;
+        self.metrics.ack_out_datagrams = self.metrics.ack_out_datagrams.saturating_add(1);
 
         Some(Datagram {
             header: DatagramHeader {
@@ -632,6 +639,7 @@ impl Session {
             return None;
         }
         self.next_nack_flush_at = now + self.nack_flush_interval;
+        self.metrics.nack_out_datagrams = self.metrics.nack_out_datagrams.saturating_add(1);
 
         Some(Datagram {
             header: DatagramHeader {
@@ -2271,6 +2279,10 @@ mod tests {
             matches!(out[1].payload, DatagramPayload::Ack(_)),
             "ACK must be emitted after NACK"
         );
+
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.ack_out_datagrams, 1);
+        assert_eq!(snapshot.nack_out_datagrams, 1);
     }
 
     #[test]
@@ -2298,5 +2310,9 @@ mod tests {
             matches!(out[1].payload, DatagramPayload::Nack(_)),
             "NACK must be emitted after ACK"
         );
+
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.ack_out_datagrams, 1);
+        assert_eq!(snapshot.nack_out_datagrams, 1);
     }
 }

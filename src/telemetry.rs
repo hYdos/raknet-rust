@@ -118,6 +118,18 @@ impl TelemetryRegistry {
                 dropped_non_critical_events.saturating_add(shard.dropped_non_critical_events);
 
             total.session_count = total.session_count.saturating_add(s.session_count);
+            total.sessions_started_total = total
+                .sessions_started_total
+                .saturating_add(s.sessions_started_total);
+            total.sessions_closed_total = total
+                .sessions_closed_total
+                .saturating_add(s.sessions_closed_total);
+            total.packets_forwarded_total = total
+                .packets_forwarded_total
+                .saturating_add(s.packets_forwarded_total);
+            total.bytes_forwarded_total = total
+                .bytes_forwarded_total
+                .saturating_add(s.bytes_forwarded_total);
             total.pending_outgoing_frames = total
                 .pending_outgoing_frames
                 .saturating_add(s.pending_outgoing_frames);
@@ -151,6 +163,8 @@ impl TelemetryRegistry {
                 .reliable_sent_datagrams
                 .saturating_add(s.reliable_sent_datagrams);
             total.resent_datagrams = total.resent_datagrams.saturating_add(s.resent_datagrams);
+            total.ack_out_total = total.ack_out_total.saturating_add(s.ack_out_total);
+            total.nack_out_total = total.nack_out_total.saturating_add(s.nack_out_total);
             total.acked_datagrams = total.acked_datagrams.saturating_add(s.acked_datagrams);
             total.nacked_datagrams = total.nacked_datagrams.saturating_add(s.nacked_datagrams);
             total.split_ttl_drops = total.split_ttl_drops.saturating_add(s.split_ttl_drops);
@@ -322,7 +336,7 @@ impl TelemetryRegistry {
     }
 
     pub fn to_records(&self) -> Vec<TelemetryRecord> {
-        self.to_records_with_prefix("mcbe_raknet")
+        self.to_records_with_prefix("raknet")
     }
 
     pub fn to_records_with_prefix(&self, prefix: &str) -> Vec<TelemetryRecord> {
@@ -377,6 +391,75 @@ impl TelemetryRegistry {
             };
         }
 
+        // P2.3 canonical metric dictionary.
+        push_snapshot_gauge!("sessions_active", "Active RakNet sessions", session_count);
+        push_snapshot_counter!(
+            "sessions_started_total",
+            "Total sessions that reached connected state",
+            sessions_started_total
+        );
+        push_snapshot_counter!(
+            "sessions_closed_total",
+            "Total connected sessions closed",
+            sessions_closed_total
+        );
+        push_snapshot_counter!(
+            "packets_forwarded_total",
+            "Total app frames forwarded to upper layer",
+            packets_forwarded_total
+        );
+        push_snapshot_counter!(
+            "bytes_forwarded_total",
+            "Total app payload bytes forwarded to upper layer",
+            bytes_forwarded_total
+        );
+        push_snapshot_counter!(
+            "ack_out_total",
+            "Total outbound ACK datagrams",
+            ack_out_total
+        );
+        push_snapshot_counter!(
+            "nack_out_total",
+            "Total outbound NACK datagrams",
+            nack_out_total
+        );
+        push_snapshot_counter!(
+            "resend_total",
+            "Total datagrams resent after loss/timeout",
+            resent_datagrams
+        );
+        push_snapshot_gauge!(
+            "rtt_srtt_ms",
+            "Average smoothed RTT in milliseconds",
+            avg_srtt_ms
+        );
+        push_snapshot_gauge!(
+            "rtt_rttvar_ms",
+            "Average RTT variance in milliseconds",
+            avg_rttvar_ms
+        );
+        push_snapshot_gauge!(
+            "rto_ms",
+            "Average resend RTO in milliseconds",
+            avg_resend_rto_ms
+        );
+        push_snapshot_gauge!(
+            "cwnd_packets",
+            "Average congestion window (datagram packets)",
+            avg_congestion_window_packets
+        );
+        push_snapshot_counter!(
+            "duplicate_drop_total",
+            "Dropped duplicate reliable frames",
+            duplicate_reliable_drops
+        );
+        push_snapshot_counter!(
+            "split_ttl_drop_total",
+            "Dropped split compounds due to TTL expiry",
+            split_ttl_drops
+        );
+
+        // Legacy names kept for backward compatibility.
         push_snapshot_gauge!("session_count", "Active RakNet sessions", session_count);
         push_snapshot_gauge!(
             "pending_outgoing_frames",
@@ -736,7 +819,7 @@ impl TelemetryRegistry {
     }
 
     pub fn render_prometheus(&self) -> String {
-        self.render_prometheus_with_prefix("mcbe_raknet")
+        self.render_prometheus_with_prefix("raknet")
     }
 
     pub fn render_prometheus_with_prefix(&self, prefix: &str) -> String {
@@ -791,6 +874,75 @@ impl TelemetryRegistry {
             };
         }
 
+        // P2.3 canonical metric dictionary.
+        write_snapshot_gauge!("sessions_active", "Active RakNet sessions", session_count);
+        write_snapshot_counter!(
+            "sessions_started_total",
+            "Total sessions that reached connected state",
+            sessions_started_total
+        );
+        write_snapshot_counter!(
+            "sessions_closed_total",
+            "Total connected sessions closed",
+            sessions_closed_total
+        );
+        write_snapshot_counter!(
+            "packets_forwarded_total",
+            "Total app frames forwarded to upper layer",
+            packets_forwarded_total
+        );
+        write_snapshot_counter!(
+            "bytes_forwarded_total",
+            "Total app payload bytes forwarded to upper layer",
+            bytes_forwarded_total
+        );
+        write_snapshot_counter!(
+            "ack_out_total",
+            "Total outbound ACK datagrams",
+            ack_out_total
+        );
+        write_snapshot_counter!(
+            "nack_out_total",
+            "Total outbound NACK datagrams",
+            nack_out_total
+        );
+        write_snapshot_counter!(
+            "resend_total",
+            "Total datagrams resent after loss/timeout",
+            resent_datagrams
+        );
+        write_snapshot_gauge!(
+            "rtt_srtt_ms",
+            "Average smoothed RTT in milliseconds",
+            avg_srtt_ms
+        );
+        write_snapshot_gauge!(
+            "rtt_rttvar_ms",
+            "Average RTT variance in milliseconds",
+            avg_rttvar_ms
+        );
+        write_snapshot_gauge!(
+            "rto_ms",
+            "Average resend RTO in milliseconds",
+            avg_resend_rto_ms
+        );
+        write_snapshot_gauge!(
+            "cwnd_packets",
+            "Average congestion window (datagram packets)",
+            avg_congestion_window_packets
+        );
+        write_snapshot_counter!(
+            "duplicate_drop_total",
+            "Dropped duplicate reliable frames",
+            duplicate_reliable_drops
+        );
+        write_snapshot_counter!(
+            "split_ttl_drop_total",
+            "Dropped split compounds due to TTL expiry",
+            split_ttl_drops
+        );
+
+        // Legacy names kept for backward compatibility.
         write_snapshot_gauge!("session_count", "Active RakNet sessions", session_count);
         write_snapshot_gauge!(
             "pending_outgoing_frames",
@@ -1299,11 +1451,25 @@ mod tests {
         let snapshot = TransportMetricsSnapshot {
             session_count: 1,
             ingress_datagrams: 9,
+            sessions_started_total: 2,
+            sessions_closed_total: 1,
+            packets_forwarded_total: 7,
+            bytes_forwarded_total: 321,
+            ack_out_total: 4,
+            nack_out_total: 1,
             ..TransportMetricsSnapshot::default()
         };
         registry.ingest_snapshot(2, snapshot, 5);
 
         let body = registry.render_prometheus_with_prefix("raknet");
+        assert!(body.contains("# HELP raknet_sessions_active Active RakNet sessions"));
+        assert!(body.contains("# TYPE raknet_sessions_active gauge"));
+        assert!(body.contains("raknet_sessions_active{scope=\"shard\",shard=\"2\"} 1"));
+        assert!(body.contains("raknet_sessions_started_total{scope=\"all\",shard=\"all\"} 2"));
+        assert!(body.contains("raknet_packets_forwarded_total{scope=\"all\",shard=\"all\"} 7"));
+        assert!(body.contains("raknet_bytes_forwarded_total{scope=\"all\",shard=\"all\"} 321"));
+        assert!(body.contains("raknet_ack_out_total{scope=\"all\",shard=\"all\"} 4"));
+        assert!(body.contains("raknet_nack_out_total{scope=\"all\",shard=\"all\"} 1"));
         assert!(body.contains("# HELP raknet_session_count Active RakNet sessions"));
         assert!(body.contains("# TYPE raknet_session_count gauge"));
         assert!(body.contains("raknet_session_count{scope=\"shard\",shard=\"2\"} 1"));
@@ -1325,11 +1491,27 @@ mod tests {
         let mut registry = TelemetryRegistry::new();
         let snapshot = TransportMetricsSnapshot {
             session_count: 4,
+            sessions_started_total: 10,
             ..TransportMetricsSnapshot::default()
         };
         registry.ingest_snapshot(1, snapshot, 0);
 
         let records = registry.to_records_with_prefix("demo");
+        let canonical = records
+            .iter()
+            .find(|record| {
+                record.name == "demo_sessions_active"
+                    && record
+                        .labels
+                        .iter()
+                        .any(|(k, v)| k == "scope" && v == "shard")
+                    && record.labels.iter().any(|(k, v)| k == "shard" && v == "1")
+            })
+            .expect("sessions_active shard record should exist");
+
+        assert_eq!(canonical.kind, TelemetryMetricKind::Gauge);
+        assert!((canonical.value - 4.0).abs() < 1e-9);
+
         let target = records
             .iter()
             .find(|record| {

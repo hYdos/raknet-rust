@@ -130,6 +130,10 @@ pub struct TransportRateLimitConfig {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TransportMetricsSnapshot {
     pub session_count: usize,
+    pub sessions_started_total: u64,
+    pub sessions_closed_total: u64,
+    pub packets_forwarded_total: u64,
+    pub bytes_forwarded_total: u64,
     pub pending_outgoing_frames: usize,
     pub pending_outgoing_bytes: usize,
     pub pending_unhandled_frames: usize,
@@ -143,6 +147,8 @@ pub struct TransportMetricsSnapshot {
     pub sequenced_missing_index_drops: u64,
     pub reliable_sent_datagrams: u64,
     pub resent_datagrams: u64,
+    pub ack_out_total: u64,
+    pub nack_out_total: u64,
     pub acked_datagrams: u64,
     pub nacked_datagrams: u64,
     pub split_ttl_drops: u64,
@@ -271,6 +277,10 @@ pub struct TransportServer {
     sessions: HashMap<SocketAddr, Session>,
     session_pipelines: HashMap<SocketAddr, SessionPipeline>,
     pending_handshakes: HashMap<SocketAddr, PendingHandshake>,
+    sessions_started_total: u64,
+    sessions_closed_total: u64,
+    packets_forwarded_total: u64,
+    bytes_forwarded_total: u64,
     illegal_state_transitions: u64,
     timed_out_sessions: u64,
     local_requested_disconnects: u64,
@@ -460,6 +470,10 @@ impl TransportServer {
             sessions: HashMap::new(),
             session_pipelines: HashMap::new(),
             pending_handshakes: HashMap::new(),
+            sessions_started_total: 0,
+            sessions_closed_total: 0,
+            packets_forwarded_total: 0,
+            bytes_forwarded_total: 0,
             illegal_state_transitions: 0,
             timed_out_sessions: 0,
             local_requested_disconnects: 0,
@@ -683,7 +697,7 @@ impl TransportServer {
         let mut illegal_transition = false;
         let mut remote_disconnect_reason: Option<RemoteDisconnectReason> = None;
 
-        let (mut frames, receipts, datagrams_to_send) = {
+        let (mut frames, receipts, datagrams_to_send, became_connected) = {
             let session_tunables = self.config.session_tunables.clone();
             let session = self
                 .sessions
@@ -701,6 +715,7 @@ impl TransportServer {
 
             let receipts = session.process_incoming_receipts(now);
             let mut app_frames = Vec::new();
+            let was_connected = session.state() == SessionState::Connected;
 
             for frame in frames {
                 let Some(id) = frame.payload.first().copied() else {
@@ -779,8 +794,9 @@ impl TransportServer {
                 .into_iter()
                 .map(ConnectedFrameDelivery::from_frame)
                 .collect();
+            let became_connected = !was_connected && session.state() == SessionState::Connected;
 
-            (app_frames, receipts, immediate_datagrams)
+            (app_frames, receipts, immediate_datagrams, became_connected)
         };
 
         if let Some(error) = decode_error {
@@ -806,6 +822,10 @@ impl TransportServer {
             }
         }
 
+        if became_connected {
+            self.sessions_started_total = self.sessions_started_total.saturating_add(1);
+        }
+
         if self
             .sessions
             .get(&addr)
@@ -815,6 +835,14 @@ impl TransportServer {
         }
 
         let frame_count = frames.len();
+        let forwarded_bytes = frames
+            .iter()
+            .map(|frame| frame.payload.len() as u64)
+            .sum::<u64>();
+        self.packets_forwarded_total = self
+            .packets_forwarded_total
+            .saturating_add(frame_count as u64);
+        self.bytes_forwarded_total = self.bytes_forwarded_total.saturating_add(forwarded_bytes);
         Ok(TransportEvent::ConnectedFrames {
             addr,
             frames,
@@ -913,6 +941,10 @@ impl TransportServer {
     pub fn metrics_snapshot(&self) -> TransportMetricsSnapshot {
         let mut total = TransportMetricsSnapshot {
             session_count: self.sessions.len(),
+            sessions_started_total: self.sessions_started_total,
+            sessions_closed_total: self.sessions_closed_total,
+            packets_forwarded_total: self.packets_forwarded_total,
+            bytes_forwarded_total: self.bytes_forwarded_total,
             illegal_state_transitions: self.illegal_state_transitions,
             timed_out_sessions: self.timed_out_sessions,
             local_requested_disconnects: self.local_requested_disconnects,
@@ -970,6 +1002,8 @@ impl TransportServer {
                 .reliable_sent_datagrams
                 .saturating_add(s.reliable_sent_datagrams);
             total.resent_datagrams = total.resent_datagrams.saturating_add(s.resent_datagrams);
+            total.ack_out_total = total.ack_out_total.saturating_add(s.ack_out_datagrams);
+            total.nack_out_total = total.nack_out_total.saturating_add(s.nack_out_datagrams);
             total.acked_datagrams = total.acked_datagrams.saturating_add(s.acked_datagrams);
             total.nacked_datagrams = total.nacked_datagrams.saturating_add(s.nacked_datagrams);
             total.split_ttl_drops = total.split_ttl_drops.saturating_add(s.split_ttl_drops);
@@ -1861,10 +1895,14 @@ impl TransportServer {
 
     fn close_session(&mut self, addr: SocketAddr) {
         self.pending_handshakes.remove(&addr);
-        if let Some(session) = self.sessions.remove(&addr)
-            && should_mark_ip_recently_connected(session.state())
-        {
-            self.mark_ip_recently_connected(addr, Instant::now());
+        if let Some(session) = self.sessions.remove(&addr) {
+            let state = session.state();
+            if should_count_closed_session(state) {
+                self.sessions_closed_total = self.sessions_closed_total.saturating_add(1);
+            }
+            if should_mark_ip_recently_connected(state) {
+                self.mark_ip_recently_connected(addr, Instant::now());
+            }
         }
         self.session_pipelines.remove(&addr);
     }
@@ -2232,6 +2270,13 @@ fn should_mark_ip_recently_connected(state: SessionState) -> bool {
         || state == SessionState::Closing
         || state == SessionState::Closed
         || is_post_reply2_handshake_state(state)
+}
+
+fn should_count_closed_session(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Connected | SessionState::Closing | SessionState::Closed
+    )
 }
 
 #[cfg(test)]
@@ -2982,7 +3027,21 @@ mod tests {
         let addr = "127.0.0.1:20100"
             .parse::<SocketAddr>()
             .expect("valid socket addr");
-        server.sessions.insert(addr, Session::new(1492));
+        let mut session = Session::new(1492);
+        assert!(TransportServer::apply_session_transitions(
+            &mut session,
+            &[
+                SessionState::Req1Recv,
+                SessionState::Reply1Sent,
+                SessionState::Req2Recv,
+                SessionState::Reply2Sent,
+                SessionState::ConnReqRecv,
+                SessionState::ConnReqAcceptedSent,
+                SessionState::NewIncomingRecv,
+                SessionState::Connected,
+            ],
+        ));
+        server.sessions.insert(addr, session);
 
         assert!(server.disconnect_peer(addr));
         server.record_remote_disconnect(RemoteDisconnectReason::DisconnectionNotification {
@@ -2994,6 +3053,7 @@ mod tests {
         assert_eq!(metrics.local_requested_disconnects, 1);
         assert_eq!(metrics.remote_disconnect_notifications, 1);
         assert_eq!(metrics.remote_detect_lost_disconnects, 1);
+        assert_eq!(metrics.sessions_closed_total, 1);
     }
 
     #[test]
