@@ -97,6 +97,9 @@ pub enum TransportEvent {
         frame_count: usize,
         receipts: ReceiptProgress,
     },
+    ConnectedDatagramDroppedNoSession {
+        addr: SocketAddr,
+    },
     PeerDisconnected {
         addr: SocketAddr,
         reason: RemoteDisconnectReason,
@@ -658,6 +661,10 @@ impl TransportServer {
             Ok(d) => d,
             Err(error) => return Ok(TransportEvent::DecodeError { addr, error }),
         };
+
+        if !self.sessions.contains_key(&addr) && !self.pending_handshakes.contains_key(&addr) {
+            return Ok(TransportEvent::ConnectedDatagramDroppedNoSession { addr });
+        }
 
         if !self.sessions.contains_key(&addr) && self.sessions.len() >= self.config.max_sessions {
             return Ok(TransportEvent::SessionLimitReached { addr });

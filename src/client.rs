@@ -1087,6 +1087,10 @@ impl RaknetClient {
             });
         }
 
+        // Client facade is poll-driven; make sure control ACK/NACK can flush
+        // immediately on this receive path without waiting for a later poll tick.
+        self.session.force_control_flush_deadlines(now);
+
         self.flush_outbound_with_limits(
             self.config.max_new_datagrams_per_recv,
             self.config.max_new_bytes_per_recv,

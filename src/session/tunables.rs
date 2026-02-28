@@ -3,8 +3,72 @@ use std::time::Duration;
 use crate::error::ConfigValidationError;
 use crate::protocol::constants;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckNackFlushProfile {
+    LowLatency,
+    Balanced,
+    Throughput,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckNackPriority {
+    NackFirst,
+    AckFirst,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AckNackFlushSettings {
+    pub ack_flush_interval: Duration,
+    pub nack_flush_interval: Duration,
+    pub ack_max_ranges_per_datagram: usize,
+    pub nack_max_ranges_per_datagram: usize,
+    pub ack_nack_priority: AckNackPriority,
+}
+
+impl AckNackFlushProfile {
+    pub fn settings(self) -> AckNackFlushSettings {
+        match self {
+            Self::LowLatency => AckNackFlushSettings {
+                ack_flush_interval: Duration::from_millis(4),
+                nack_flush_interval: Duration::from_millis(1),
+                ack_max_ranges_per_datagram: 24,
+                nack_max_ranges_per_datagram: 64,
+                ack_nack_priority: AckNackPriority::NackFirst,
+            },
+            Self::Balanced => AckNackFlushSettings {
+                ack_flush_interval: Duration::from_millis(10),
+                nack_flush_interval: Duration::from_millis(2),
+                ack_max_ranges_per_datagram: 48,
+                nack_max_ranges_per_datagram: 96,
+                ack_nack_priority: AckNackPriority::NackFirst,
+            },
+            Self::Throughput => AckNackFlushSettings {
+                ack_flush_interval: Duration::from_millis(24),
+                nack_flush_interval: Duration::from_millis(4),
+                ack_max_ranges_per_datagram: 96,
+                nack_max_ranges_per_datagram: 128,
+                ack_nack_priority: AckNackPriority::NackFirst,
+            },
+            Self::Custom => AckNackFlushSettings {
+                ack_flush_interval: Duration::from_millis(10),
+                nack_flush_interval: Duration::from_millis(2),
+                ack_max_ranges_per_datagram: 48,
+                nack_max_ranges_per_datagram: 96,
+                ack_nack_priority: AckNackPriority::NackFirst,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionTunables {
+    pub ack_nack_flush_profile: AckNackFlushProfile,
+    pub ack_flush_interval: Duration,
+    pub nack_flush_interval: Duration,
+    pub ack_max_ranges_per_datagram: usize,
+    pub nack_max_ranges_per_datagram: usize,
+    pub ack_nack_priority: AckNackPriority,
     pub ack_queue_capacity: usize,
     pub reliable_window: usize,
     pub split_ttl: Duration,
@@ -39,7 +103,15 @@ pub struct SessionTunables {
 
 impl Default for SessionTunables {
     fn default() -> Self {
+        let profile = AckNackFlushProfile::Balanced;
+        let settings = profile.settings();
         Self {
+            ack_nack_flush_profile: profile,
+            ack_flush_interval: settings.ack_flush_interval,
+            nack_flush_interval: settings.nack_flush_interval,
+            ack_max_ranges_per_datagram: settings.ack_max_ranges_per_datagram,
+            nack_max_ranges_per_datagram: settings.nack_max_ranges_per_datagram,
+            ack_nack_priority: settings.ack_nack_priority,
             ack_queue_capacity: 1024,
             reliable_window: constants::MAX_ACK_SEQUENCES as usize,
             split_ttl: Duration::from_millis(constants::SPLIT_REASSEMBLY_TTL_MS),
@@ -75,7 +147,52 @@ impl Default for SessionTunables {
 }
 
 impl SessionTunables {
+    pub fn resolved_ack_nack_flush_settings(&self) -> AckNackFlushSettings {
+        match self.ack_nack_flush_profile {
+            AckNackFlushProfile::LowLatency
+            | AckNackFlushProfile::Balanced
+            | AckNackFlushProfile::Throughput => self.ack_nack_flush_profile.settings(),
+            AckNackFlushProfile::Custom => AckNackFlushSettings {
+                ack_flush_interval: self.ack_flush_interval,
+                nack_flush_interval: self.nack_flush_interval,
+                ack_max_ranges_per_datagram: self.ack_max_ranges_per_datagram,
+                nack_max_ranges_per_datagram: self.nack_max_ranges_per_datagram,
+                ack_nack_priority: self.ack_nack_priority,
+            },
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let ack_nack = self.resolved_ack_nack_flush_settings();
+        if ack_nack.ack_flush_interval.is_zero() {
+            return Err(ConfigValidationError::new(
+                "SessionTunables",
+                "ack_flush_interval",
+                "must be > 0",
+            ));
+        }
+        if ack_nack.nack_flush_interval.is_zero() {
+            return Err(ConfigValidationError::new(
+                "SessionTunables",
+                "nack_flush_interval",
+                "must be > 0",
+            ));
+        }
+        if ack_nack.ack_max_ranges_per_datagram == 0 {
+            return Err(ConfigValidationError::new(
+                "SessionTunables",
+                "ack_max_ranges_per_datagram",
+                "must be >= 1",
+            ));
+        }
+        if ack_nack.nack_max_ranges_per_datagram == 0 {
+            return Err(ConfigValidationError::new(
+                "SessionTunables",
+                "nack_max_ranges_per_datagram",
+                "must be >= 1",
+            ));
+        }
+
         if self.ack_queue_capacity == 0 {
             return Err(ConfigValidationError::new(
                 "SessionTunables",
@@ -296,7 +413,9 @@ fn validate_fraction(value: f64, field: &'static str) -> Result<(), ConfigValida
 
 #[cfg(test)]
 mod tests {
-    use super::SessionTunables;
+    use std::time::Duration;
+
+    use super::{AckNackFlushProfile, AckNackPriority, SessionTunables};
 
     #[test]
     fn validate_accepts_default_values() {
@@ -316,5 +435,39 @@ mod tests {
             .expect_err("ack_queue_capacity=0 must be rejected");
         assert_eq!(err.config, "SessionTunables");
         assert_eq!(err.field, "ack_queue_capacity");
+    }
+
+    #[test]
+    fn validate_rejects_zero_custom_ack_flush_interval() {
+        let tunables = SessionTunables {
+            ack_nack_flush_profile: AckNackFlushProfile::Custom,
+            ack_flush_interval: Duration::ZERO,
+            ..SessionTunables::default()
+        };
+        let err = tunables
+            .validate()
+            .expect_err("ack_flush_interval=0 must be rejected for custom policy");
+        assert_eq!(err.config, "SessionTunables");
+        assert_eq!(err.field, "ack_flush_interval");
+    }
+
+    #[test]
+    fn profile_resolution_uses_profile_defaults_when_not_custom() {
+        let tunables = SessionTunables {
+            ack_nack_flush_profile: AckNackFlushProfile::LowLatency,
+            ack_flush_interval: Duration::from_secs(99),
+            nack_flush_interval: Duration::from_secs(99),
+            ack_max_ranges_per_datagram: 1,
+            nack_max_ranges_per_datagram: 1,
+            ack_nack_priority: AckNackPriority::AckFirst,
+            ..SessionTunables::default()
+        };
+
+        let resolved = tunables.resolved_ack_nack_flush_settings();
+        assert_eq!(resolved.ack_flush_interval, Duration::from_millis(4));
+        assert_eq!(resolved.nack_flush_interval, Duration::from_millis(1));
+        assert_eq!(resolved.ack_max_ranges_per_datagram, 24);
+        assert_eq!(resolved.nack_max_ranges_per_datagram, 64);
+        assert_eq!(resolved.ack_nack_priority, AckNackPriority::NackFirst);
     }
 }

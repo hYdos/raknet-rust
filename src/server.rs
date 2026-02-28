@@ -383,6 +383,7 @@ impl RaknetServer {
                     self.pending_events
                         .push_back(RaknetServerEvent::SessionLimitReached { addr });
                 }
+                TransportEvent::ConnectedDatagramDroppedNoSession { .. } => {}
                 TransportEvent::ProxyDropped { addr } => {
                     self.pending_events
                         .push_back(RaknetServerEvent::ProxyDropped { addr });

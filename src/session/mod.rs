@@ -29,7 +29,7 @@ use crate::protocol::reliability::Reliability;
 use crate::protocol::sequence24::Sequence24;
 
 use self::reliable_tracker::ReliableTracker;
-use self::tunables::SessionTunables;
+use self::tunables::{AckNackPriority, SessionTunables};
 
 #[derive(Debug, Clone)]
 pub struct TrackedDatagram {
@@ -162,6 +162,13 @@ pub struct Session {
     last_min_weight: u64,
     outgoing_acks: AckQueue,
     outgoing_nacks: AckQueue,
+    ack_flush_interval: Duration,
+    nack_flush_interval: Duration,
+    ack_max_ranges_per_datagram: usize,
+    nack_max_ranges_per_datagram: usize,
+    ack_nack_priority: AckNackPriority,
+    next_ack_flush_at: Instant,
+    next_nack_flush_at: Instant,
     incoming_acks: VecDeque<SequenceRange>,
     incoming_nacks: VecDeque<SequenceRange>,
     sent_datagrams: BTreeMap<Sequence24, TrackedDatagram>,
@@ -222,6 +229,7 @@ impl Session {
         } else {
             0.0
         };
+        let ack_nack_flush = tunables.resolved_ack_nack_flush_settings();
         let mut s = Self {
             state: SessionState::Offline,
             mtu,
@@ -249,6 +257,13 @@ impl Session {
             last_min_weight: 0,
             outgoing_acks: AckQueue::new(tunables.ack_queue_capacity),
             outgoing_nacks: AckQueue::new(tunables.ack_queue_capacity),
+            ack_flush_interval: ack_nack_flush.ack_flush_interval,
+            nack_flush_interval: ack_nack_flush.nack_flush_interval,
+            ack_max_ranges_per_datagram: ack_nack_flush.ack_max_ranges_per_datagram,
+            nack_max_ranges_per_datagram: ack_nack_flush.nack_max_ranges_per_datagram,
+            ack_nack_priority: ack_nack_flush.ack_nack_priority,
+            next_ack_flush_at: now,
+            next_nack_flush_at: now,
             incoming_acks: VecDeque::new(),
             incoming_nacks: VecDeque::new(),
             sent_datagrams: BTreeMap::new(),
@@ -356,6 +371,15 @@ impl Session {
         self.outgoing_queued_bytes
     }
 
+    pub fn force_control_flush_deadlines(&mut self, now: Instant) {
+        if !self.outgoing_acks.is_empty() {
+            self.next_ack_flush_at = now;
+        }
+        if !self.outgoing_nacks.is_empty() {
+            self.next_nack_flush_at = now;
+        }
+    }
+
     pub fn take_backpressure_disconnect(&mut self) -> bool {
         let should_disconnect = self.disconnect_requested_by_backpressure;
         self.disconnect_requested_by_backpressure = false;
@@ -397,24 +421,32 @@ impl Session {
         }
     }
 
-    pub fn process_datagram_sequence(&mut self, seq: Sequence24) {
+    pub fn process_datagram_sequence(&mut self, seq: Sequence24, now: Instant) {
         let expected = self.datagram_read_index;
 
         if expected > seq {
+            let ack_was_empty = self.outgoing_acks.is_empty();
             self.outgoing_acks.push(SequenceRange {
                 start: seq,
                 end: seq,
             });
+            if ack_was_empty {
+                self.next_ack_flush_at = now + self.ack_flush_interval;
+            }
             return;
         }
 
         self.datagram_read_index = seq.next();
 
         if seq == expected {
+            let ack_was_empty = self.outgoing_acks.is_empty();
             self.outgoing_acks.push(SequenceRange {
                 start: seq,
                 end: seq,
             });
+            if ack_was_empty {
+                self.next_ack_flush_at = now + self.ack_flush_interval;
+            }
             return;
         }
 
@@ -430,10 +462,14 @@ impl Session {
                 count += 1;
             }
 
+            let nack_was_empty = self.outgoing_nacks.is_empty();
             self.outgoing_nacks.push(SequenceRange {
                 start: nack_start,
                 end: chunk_end,
             });
+            if nack_was_empty {
+                self.next_nack_flush_at = now + self.nack_flush_interval;
+            }
 
             if chunk_end == nack_end {
                 break;
@@ -442,10 +478,14 @@ impl Session {
             nack_start = chunk_end.next();
         }
 
+        let ack_was_empty = self.outgoing_acks.is_empty();
         self.outgoing_acks.push(SequenceRange {
             start: seq,
             end: seq,
         });
+        if ack_was_empty {
+            self.next_ack_flush_at = now + self.ack_flush_interval;
+        }
     }
 
     pub fn ingest_datagram(
@@ -469,7 +509,7 @@ impl Session {
                     .metrics
                     .ingress_frames
                     .saturating_add(frames.len() as u64);
-                self.process_datagram_sequence(datagram.header.sequence);
+                self.process_datagram_sequence(datagram.header.sequence, now);
                 self.handle_frames(frames, now)
             }
         }
@@ -552,11 +592,14 @@ impl Session {
         Ok(out)
     }
 
-    pub fn drain_ack_datagram(&mut self) -> Option<Datagram> {
-        let ranges = self.outgoing_acks.pop_for_mtu(self.mtu, 3);
+    pub fn drain_ack_datagram(&mut self, now: Instant) -> Option<Datagram> {
+        let ranges = self
+            .outgoing_acks
+            .pop_for_mtu(self.mtu, 3, self.ack_max_ranges_per_datagram);
         if ranges.is_empty() {
             return None;
         }
+        self.next_ack_flush_at = now + self.ack_flush_interval;
 
         Some(Datagram {
             header: DatagramHeader {
@@ -567,11 +610,14 @@ impl Session {
         })
     }
 
-    pub fn drain_nack_datagram(&mut self) -> Option<Datagram> {
-        let ranges = self.outgoing_nacks.pop_for_mtu(self.mtu, 3);
+    pub fn drain_nack_datagram(&mut self, now: Instant) -> Option<Datagram> {
+        let ranges =
+            self.outgoing_nacks
+                .pop_for_mtu(self.mtu, 3, self.nack_max_ranges_per_datagram);
         if ranges.is_empty() {
             return None;
         }
+        self.next_nack_flush_at = now + self.nack_flush_interval;
 
         Some(Datagram {
             header: DatagramHeader {
@@ -875,11 +921,15 @@ impl Session {
         let mut out = Vec::new();
         self.refresh_pacing_budget(now);
 
-        if let Some(ack) = self.drain_ack_datagram() {
-            out.push(ack);
-        }
-        if let Some(nack) = self.drain_nack_datagram() {
-            out.push(nack);
+        match self.ack_nack_priority {
+            AckNackPriority::NackFirst => {
+                self.flush_nack_if_due(now, &mut out);
+                self.flush_ack_if_due(now, &mut out);
+            }
+            AckNackPriority::AckFirst => {
+                self.flush_ack_if_due(now, &mut out);
+                self.flush_nack_if_due(now, &mut out);
+            }
         }
 
         let pacing_budget = if self.pacing_enabled {
@@ -931,6 +981,24 @@ impl Session {
 
         self.prune_split_state(now);
         out
+    }
+
+    fn flush_ack_if_due(&mut self, now: Instant, out: &mut Vec<Datagram>) {
+        if self.outgoing_acks.is_empty() || now < self.next_ack_flush_at {
+            return;
+        }
+        if let Some(ack) = self.drain_ack_datagram(now) {
+            out.push(ack);
+        }
+    }
+
+    fn flush_nack_if_due(&mut self, now: Instant, out: &mut Vec<Datagram>) {
+        if self.outgoing_nacks.is_empty() || now < self.next_nack_flush_at {
+            return;
+        }
+        if let Some(nack) = self.drain_nack_datagram(now) {
+            out.push(nack);
+        }
     }
 
     pub fn prune_split_state(&mut self, now: Instant) -> usize {
@@ -1404,8 +1472,10 @@ mod tests {
 
     use super::{QueuePayloadResult, RakPriority, Session, SessionState};
     use crate::protocol::ack::{AckNackPayload, SequenceRange};
+    use crate::protocol::datagram::DatagramPayload;
     use crate::protocol::reliability::Reliability;
-    use crate::session::tunables::SessionTunables;
+    use crate::protocol::sequence24::Sequence24;
+    use crate::session::tunables::{AckNackFlushProfile, AckNackPriority, SessionTunables};
 
     fn transition_to_connected(session: &mut Session) {
         assert!(session.transition_to(SessionState::Req1Recv));
@@ -1950,5 +2020,121 @@ mod tests {
             .acked_receipt_ids;
         receipts.sort_unstable();
         assert_eq!(receipts, vec![10, 20]);
+    }
+
+    #[test]
+    fn ack_flush_interval_defers_ack_until_deadline() {
+        let tunables = SessionTunables {
+            ack_nack_flush_profile: AckNackFlushProfile::Custom,
+            ack_flush_interval: Duration::from_millis(50),
+            nack_flush_interval: Duration::from_millis(1),
+            ack_max_ranges_per_datagram: 64,
+            nack_max_ranges_per_datagram: 64,
+            ack_nack_priority: AckNackPriority::NackFirst,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+        let now = Instant::now();
+
+        session.process_datagram_sequence(Sequence24::new(0), now);
+        let early = session.on_tick(now + Duration::from_millis(10), 0, 0, 0, 0);
+        assert!(
+            early.is_empty(),
+            "ack must not flush before configured interval"
+        );
+
+        let due = session.on_tick(now + Duration::from_millis(50), 0, 0, 0, 0);
+        assert_eq!(due.len(), 1, "ack should flush at deadline");
+        assert!(
+            matches!(due[0].payload, DatagramPayload::Ack(_)),
+            "flushed control packet must be ACK"
+        );
+    }
+
+    #[test]
+    fn ack_batch_max_ranges_splits_large_ack_queue_across_ticks() {
+        let tunables = SessionTunables {
+            ack_nack_flush_profile: AckNackFlushProfile::Custom,
+            ack_flush_interval: Duration::from_millis(1),
+            nack_flush_interval: Duration::from_millis(1),
+            ack_max_ranges_per_datagram: 2,
+            nack_max_ranges_per_datagram: 64,
+            ack_nack_priority: AckNackPriority::NackFirst,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+        let now = Instant::now();
+
+        session.outgoing_acks.push(SequenceRange {
+            start: Sequence24::new(1),
+            end: Sequence24::new(1),
+        });
+        session.outgoing_acks.push(SequenceRange {
+            start: Sequence24::new(3),
+            end: Sequence24::new(3),
+        });
+        session.outgoing_acks.push(SequenceRange {
+            start: Sequence24::new(5),
+            end: Sequence24::new(5),
+        });
+
+        let first = session.on_tick(now, 0, 0, 0, 0);
+        assert_eq!(first.len(), 1);
+        match &first[0].payload {
+            DatagramPayload::Ack(payload) => assert_eq!(payload.ranges.len(), 2),
+            _ => panic!("expected ACK payload"),
+        }
+
+        let second = session.on_tick(now + Duration::from_millis(1), 0, 0, 0, 0);
+        assert_eq!(second.len(), 1);
+        match &second[0].payload {
+            DatagramPayload::Ack(payload) => assert_eq!(payload.ranges.len(), 1),
+            _ => panic!("expected ACK payload"),
+        }
+    }
+
+    #[test]
+    fn nack_first_priority_flushes_nack_before_ack() {
+        let mut session = Session::new(1400);
+        let now = Instant::now();
+
+        session.process_datagram_sequence(Sequence24::new(2), now);
+        let out = session.on_tick(now + Duration::from_millis(10), 0, 0, 0, 0);
+        assert_eq!(out.len(), 2, "both NACK and ACK must be flushed");
+        assert!(
+            matches!(out[0].payload, DatagramPayload::Nack(_)),
+            "NACK must be emitted before ACK when priority is NackFirst"
+        );
+        assert!(
+            matches!(out[1].payload, DatagramPayload::Ack(_)),
+            "ACK must be emitted after NACK"
+        );
+    }
+
+    #[test]
+    fn ack_first_priority_flushes_ack_before_nack_in_custom_policy() {
+        let tunables = SessionTunables {
+            ack_nack_flush_profile: AckNackFlushProfile::Custom,
+            ack_flush_interval: Duration::from_millis(1),
+            nack_flush_interval: Duration::from_millis(1),
+            ack_max_ranges_per_datagram: 64,
+            nack_max_ranges_per_datagram: 64,
+            ack_nack_priority: AckNackPriority::AckFirst,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+        let now = Instant::now();
+
+        session.process_datagram_sequence(Sequence24::new(2), now);
+        let out = session.on_tick(now + Duration::from_millis(1), 0, 0, 0, 0);
+        assert_eq!(out.len(), 2, "both ACK and NACK must be flushed");
+        assert!(
+            matches!(out[0].payload, DatagramPayload::Ack(_)),
+            "ACK must be emitted before NACK when priority is AckFirst"
+        );
+        assert!(
+            matches!(out[1].payload, DatagramPayload::Nack(_)),
+            "NACK must be emitted after ACK"
+        );
     }
 }
