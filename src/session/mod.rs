@@ -29,7 +29,7 @@ use crate::protocol::reliability::Reliability;
 use crate::protocol::sequence24::Sequence24;
 
 use self::reliable_tracker::ReliableTracker;
-use self::tunables::{AckNackPriority, SessionTunables};
+use self::tunables::{AckNackPriority, BackpressureMode, SessionTunables};
 
 #[derive(Debug, Clone)]
 pub struct TrackedDatagram {
@@ -74,6 +74,9 @@ struct SessionMetrics {
     outgoing_queue_drops: u64,
     outgoing_queue_defers: u64,
     outgoing_queue_disconnects: u64,
+    backpressure_delays: u64,
+    backpressure_drops: u64,
+    backpressure_disconnects: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -95,6 +98,9 @@ pub struct SessionMetricsSnapshot {
     pub outgoing_queue_drops: u64,
     pub outgoing_queue_defers: u64,
     pub outgoing_queue_disconnects: u64,
+    pub backpressure_delays: u64,
+    pub backpressure_drops: u64,
+    pub backpressure_disconnects: u64,
     pub srtt_ms: f64,
     pub rttvar_ms: f64,
     pub resend_rto_ms: f64,
@@ -201,6 +207,7 @@ pub struct Session {
     outgoing_queue_max_frames: usize,
     outgoing_queue_max_bytes: usize,
     outgoing_queue_soft_ratio: f64,
+    backpressure_mode: BackpressureMode,
     disconnect_requested_by_backpressure: bool,
     metrics: SessionMetrics,
 }
@@ -304,6 +311,7 @@ impl Session {
             outgoing_queue_max_frames: tunables.outgoing_queue_max_frames.max(1),
             outgoing_queue_max_bytes: tunables.outgoing_queue_max_bytes.max(1),
             outgoing_queue_soft_ratio: tunables.outgoing_queue_soft_ratio.clamp(0.05, 0.99),
+            backpressure_mode: tunables.backpressure_mode,
             disconnect_requested_by_backpressure: false,
             metrics: SessionMetrics::default(),
         };
@@ -411,6 +419,9 @@ impl Session {
             outgoing_queue_drops: self.metrics.outgoing_queue_drops,
             outgoing_queue_defers: self.metrics.outgoing_queue_defers,
             outgoing_queue_disconnects: self.metrics.outgoing_queue_disconnects,
+            backpressure_delays: self.metrics.backpressure_delays,
+            backpressure_drops: self.metrics.backpressure_drops,
+            backpressure_disconnects: self.metrics.backpressure_disconnects,
             srtt_ms: self.srtt_ms.unwrap_or(0.0),
             rttvar_ms: self.rttvar_ms,
             resend_rto_ms: self.resend_rto.as_secs_f64() * 1000.0,
@@ -707,16 +718,21 @@ impl Session {
             BackpressureAction::Drop => {
                 self.metrics.outgoing_queue_drops =
                     self.metrics.outgoing_queue_drops.saturating_add(1);
+                self.metrics.backpressure_drops = self.metrics.backpressure_drops.saturating_add(1);
                 return QueuePayloadResult::Dropped;
             }
             BackpressureAction::Defer => {
                 self.metrics.outgoing_queue_defers =
                     self.metrics.outgoing_queue_defers.saturating_add(1);
+                self.metrics.backpressure_delays =
+                    self.metrics.backpressure_delays.saturating_add(1);
                 return QueuePayloadResult::Deferred;
             }
             BackpressureAction::Disconnect => {
                 self.metrics.outgoing_queue_disconnects =
                     self.metrics.outgoing_queue_disconnects.saturating_add(1);
+                self.metrics.backpressure_disconnects =
+                    self.metrics.backpressure_disconnects.saturating_add(1);
                 self.disconnect_requested_by_backpressure = true;
                 return QueuePayloadResult::DisconnectRequested;
             }
@@ -1254,27 +1270,23 @@ impl Session {
         let exceeds_hard = projected_frames > hard_frames || projected_bytes > hard_bytes;
         let exceeds_soft = projected_frames > soft_frames || projected_bytes > soft_bytes;
         let reliable = reliability.is_reliable();
-        let critical_reliable =
-            reliable && matches!(priority, RakPriority::Immediate | RakPriority::High);
 
         if exceeds_hard {
-            if critical_reliable {
-                return BackpressureAction::Disconnect;
-            }
-            if reliable {
-                return BackpressureAction::Defer;
-            }
-            return BackpressureAction::Drop;
+            return match self.backpressure_mode {
+                BackpressureMode::Delay => BackpressureAction::Defer,
+                BackpressureMode::Shed => {
+                    if !reliable || matches!(priority, RakPriority::Normal | RakPriority::Low) {
+                        BackpressureAction::Drop
+                    } else {
+                        BackpressureAction::Defer
+                    }
+                }
+                BackpressureMode::Disconnect => BackpressureAction::Disconnect,
+            };
         }
 
         if exceeds_soft {
-            if !reliable {
-                return BackpressureAction::Drop;
-            }
-
-            if matches!(priority, RakPriority::Normal | RakPriority::Low) {
-                return BackpressureAction::Defer;
-            }
+            return BackpressureAction::Defer;
         }
 
         BackpressureAction::Allow
@@ -1475,7 +1487,9 @@ mod tests {
     use crate::protocol::datagram::DatagramPayload;
     use crate::protocol::reliability::Reliability;
     use crate::protocol::sequence24::Sequence24;
-    use crate::session::tunables::{AckNackFlushProfile, AckNackPriority, SessionTunables};
+    use crate::session::tunables::{
+        AckNackFlushProfile, AckNackPriority, BackpressureMode, SessionTunables,
+    };
 
     fn transition_to_connected(session: &mut Session) {
         assert!(session.transition_to(SessionState::Req1Recv));
@@ -1522,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_backpressure_drops_unreliable_payloads() {
+    fn soft_backpressure_delays_unreliable_payloads() {
         let tunables = SessionTunables {
             outgoing_queue_max_frames: 4,
             outgoing_queue_max_bytes: 8 * 1024,
@@ -1558,16 +1572,21 @@ mod tests {
                 0,
                 RakPriority::Low
             ),
-            QueuePayloadResult::Dropped
+            QueuePayloadResult::Deferred
         ));
+
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.outgoing_queue_defers, 1);
+        assert_eq!(snapshot.backpressure_delays, 1);
     }
 
     #[test]
-    fn hard_backpressure_disconnects_critical_reliable() {
+    fn hard_backpressure_disconnects_in_disconnect_mode() {
         let tunables = SessionTunables {
-            outgoing_queue_max_frames: 2,
+            outgoing_queue_max_frames: 1,
             outgoing_queue_max_bytes: 8 * 1024,
             outgoing_queue_soft_ratio: 0.5,
+            backpressure_mode: BackpressureMode::Disconnect,
             ..SessionTunables::default()
         };
 
@@ -1579,16 +1598,10 @@ mod tests {
             0,
             RakPriority::High,
         );
-        let _ = session.queue_payload(
-            Bytes::from_static(b"b"),
-            Reliability::Reliable,
-            0,
-            RakPriority::High,
-        );
 
         assert!(matches!(
             session.queue_payload(
-                Bytes::from_static(b"c"),
+                Bytes::from_static(b"b"),
                 Reliability::Reliable,
                 0,
                 RakPriority::Immediate
@@ -1596,6 +1609,105 @@ mod tests {
             QueuePayloadResult::DisconnectRequested
         ));
         assert!(session.take_backpressure_disconnect());
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.backpressure_disconnects, 1);
+    }
+
+    #[test]
+    fn hard_backpressure_sheds_low_priority_in_shed_mode() {
+        let tunables = SessionTunables {
+            outgoing_queue_max_frames: 1,
+            outgoing_queue_max_bytes: 8 * 1024,
+            outgoing_queue_soft_ratio: 0.5,
+            backpressure_mode: BackpressureMode::Shed,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+
+        let _ = session.queue_payload(
+            Bytes::from_static(b"a"),
+            Reliability::Reliable,
+            0,
+            RakPriority::High,
+        );
+
+        assert!(matches!(
+            session.queue_payload(
+                Bytes::from_static(b"b"),
+                Reliability::Unreliable,
+                0,
+                RakPriority::Low
+            ),
+            QueuePayloadResult::Dropped
+        ));
+        assert!(!session.take_backpressure_disconnect());
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.backpressure_drops, 1);
+    }
+
+    #[test]
+    fn hard_backpressure_shed_mode_defers_high_priority_reliable() {
+        let tunables = SessionTunables {
+            outgoing_queue_max_frames: 1,
+            outgoing_queue_max_bytes: 8 * 1024,
+            outgoing_queue_soft_ratio: 0.5,
+            backpressure_mode: BackpressureMode::Shed,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+
+        let _ = session.queue_payload(
+            Bytes::from_static(b"a"),
+            Reliability::Reliable,
+            0,
+            RakPriority::High,
+        );
+
+        assert!(matches!(
+            session.queue_payload(
+                Bytes::from_static(b"b"),
+                Reliability::Reliable,
+                0,
+                RakPriority::Immediate
+            ),
+            QueuePayloadResult::Deferred
+        ));
+        assert!(!session.take_backpressure_disconnect());
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.backpressure_delays, 1);
+        assert_eq!(snapshot.backpressure_drops, 0);
+    }
+
+    #[test]
+    fn hard_backpressure_delays_in_delay_mode() {
+        let tunables = SessionTunables {
+            outgoing_queue_max_frames: 1,
+            outgoing_queue_max_bytes: 8 * 1024,
+            outgoing_queue_soft_ratio: 0.5,
+            backpressure_mode: BackpressureMode::Delay,
+            ..SessionTunables::default()
+        };
+        let mut session = Session::with_tunables(1400, tunables);
+
+        let _ = session.queue_payload(
+            Bytes::from_static(b"a"),
+            Reliability::Reliable,
+            0,
+            RakPriority::High,
+        );
+
+        assert!(matches!(
+            session.queue_payload(
+                Bytes::from_static(b"b"),
+                Reliability::Reliable,
+                0,
+                RakPriority::Low
+            ),
+            QueuePayloadResult::Deferred
+        ));
+        assert!(!session.take_backpressure_disconnect());
+        let snapshot = session.metrics_snapshot();
+        assert_eq!(snapshot.backpressure_delays, 1);
     }
 
     #[test]

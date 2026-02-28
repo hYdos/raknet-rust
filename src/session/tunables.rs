@@ -17,6 +17,13 @@ pub enum AckNackPriority {
     AckFirst,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressureMode {
+    Delay,
+    Shed,
+    Disconnect,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AckNackFlushSettings {
     pub ack_flush_interval: Duration,
@@ -70,6 +77,7 @@ pub struct SessionTunables {
     pub nack_max_ranges_per_datagram: usize,
     pub ack_nack_priority: AckNackPriority,
     pub ack_queue_capacity: usize,
+    pub backpressure_mode: BackpressureMode,
     pub reliable_window: usize,
     pub split_ttl: Duration,
     pub max_split_parts: u32,
@@ -113,6 +121,7 @@ impl Default for SessionTunables {
             nack_max_ranges_per_datagram: settings.nack_max_ranges_per_datagram,
             ack_nack_priority: settings.ack_nack_priority,
             ack_queue_capacity: 1024,
+            backpressure_mode: BackpressureMode::Shed,
             reliable_window: constants::MAX_ACK_SEQUENCES as usize,
             split_ttl: Duration::from_millis(constants::SPLIT_REASSEMBLY_TTL_MS),
             max_split_parts: constants::MAX_SPLIT_PARTS,

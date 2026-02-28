@@ -163,6 +163,15 @@ impl TelemetryRegistry {
             total.outgoing_queue_disconnects = total
                 .outgoing_queue_disconnects
                 .saturating_add(s.outgoing_queue_disconnects);
+            total.backpressure_delays = total
+                .backpressure_delays
+                .saturating_add(s.backpressure_delays);
+            total.backpressure_drops = total
+                .backpressure_drops
+                .saturating_add(s.backpressure_drops);
+            total.backpressure_disconnects = total
+                .backpressure_disconnects
+                .saturating_add(s.backpressure_disconnects);
             total.local_requested_disconnects = total
                 .local_requested_disconnects
                 .saturating_add(s.local_requested_disconnects);
@@ -464,6 +473,21 @@ impl TelemetryRegistry {
             "outgoing_queue_disconnects_total",
             "Disconnects triggered by outgoing queue hard pressure",
             outgoing_queue_disconnects
+        );
+        push_snapshot_counter!(
+            "backpressure_delay_total",
+            "Backpressure delay actions (deferred packets)",
+            backpressure_delays
+        );
+        push_snapshot_counter!(
+            "backpressure_drop_total",
+            "Backpressure shed actions (dropped packets)",
+            backpressure_drops
+        );
+        push_snapshot_counter!(
+            "backpressure_disconnect_total",
+            "Backpressure disconnect actions",
+            backpressure_disconnects
         );
         push_snapshot_counter!(
             "local_requested_disconnects_total",
@@ -863,6 +887,21 @@ impl TelemetryRegistry {
             "outgoing_queue_disconnects_total",
             "Disconnects triggered by outgoing queue hard pressure",
             outgoing_queue_disconnects
+        );
+        write_snapshot_counter!(
+            "backpressure_delay_total",
+            "Backpressure delay actions (deferred packets)",
+            backpressure_delays
+        );
+        write_snapshot_counter!(
+            "backpressure_drop_total",
+            "Backpressure shed actions (dropped packets)",
+            backpressure_drops
+        );
+        write_snapshot_counter!(
+            "backpressure_disconnect_total",
+            "Backpressure disconnect actions",
+            backpressure_disconnects
         );
         write_snapshot_counter!(
             "local_requested_disconnects_total",

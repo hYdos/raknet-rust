@@ -149,6 +149,9 @@ pub struct TransportMetricsSnapshot {
     pub outgoing_queue_drops: u64,
     pub outgoing_queue_defers: u64,
     pub outgoing_queue_disconnects: u64,
+    pub backpressure_delays: u64,
+    pub backpressure_drops: u64,
+    pub backpressure_disconnects: u64,
     pub local_requested_disconnects: u64,
     pub remote_disconnect_notifications: u64,
     pub remote_detect_lost_disconnects: u64,
@@ -979,6 +982,15 @@ impl TransportServer {
             total.outgoing_queue_disconnects = total
                 .outgoing_queue_disconnects
                 .saturating_add(s.outgoing_queue_disconnects);
+            total.backpressure_delays = total
+                .backpressure_delays
+                .saturating_add(s.backpressure_delays);
+            total.backpressure_drops = total
+                .backpressure_drops
+                .saturating_add(s.backpressure_drops);
+            total.backpressure_disconnects = total
+                .backpressure_disconnects
+                .saturating_add(s.backpressure_disconnects);
 
             srtt_sum += s.srtt_ms;
             rttvar_sum += s.rttvar_ms;
