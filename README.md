@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/Status-Alpha-orange)](#)
 [![Platform](https://img.shields.io/badge/Platform-%20RakNet-2ea44f)](#)
 
-`raknet-rust` is a RakNet transport library written in Rust.
+`raknet-rustt` is a RakNet transport library written in Rust.
 
 It is built for modern async server/client networking and is especially useful for
 Minecraft Bedrock Edition projects (servers, proxies, and tooling), while still remaining
