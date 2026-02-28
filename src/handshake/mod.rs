@@ -128,25 +128,75 @@ pub enum OfflinePacket {
     IpRecentlyConnected(IpRecentlyConnected),
 }
 
+macro_rules! offline_packet_registry {
+    ($($id:ident => $variant:ident => $decoder:expr),+ $(,)?) => {
+        fn offline_packet_id(packet: &OfflinePacket) -> u8 {
+            match packet {
+                $(OfflinePacket::$variant(_) => $id,)+
+            }
+        }
+
+        fn decode_offline_packet_with_registry(
+            id: u8,
+            src: &mut impl Buf,
+            expected_magic: Magic,
+        ) -> Result<OfflinePacket, DecodeError> {
+            match id {
+                $($id => ($decoder)(src, expected_magic),)+
+                _ => Err(DecodeError::InvalidOfflinePacketId(id)),
+            }
+        }
+    };
+}
+
+offline_packet_registry! {
+    ID_UNCONNECTED_PING => UnconnectedPing =>
+        |src, expected_magic| decode_ping(src, expected_magic).map(OfflinePacket::UnconnectedPing),
+    ID_UNCONNECTED_PING_OPEN_CONNECTIONS => UnconnectedPingOpenConnections =>
+        |src, expected_magic| decode_ping(src, expected_magic).map(OfflinePacket::UnconnectedPingOpenConnections),
+    ID_UNCONNECTED_PONG => UnconnectedPong =>
+        |src, expected_magic| decode_pong(src, expected_magic).map(OfflinePacket::UnconnectedPong),
+    ID_OPEN_CONNECTION_REQUEST_1 => OpenConnectionRequest1 =>
+        |src, expected_magic| decode_request_1(src, expected_magic).map(OfflinePacket::OpenConnectionRequest1),
+    ID_OPEN_CONNECTION_REPLY_1 => OpenConnectionReply1 =>
+        |src, expected_magic| decode_reply_1(src, expected_magic).map(OfflinePacket::OpenConnectionReply1),
+    ID_OPEN_CONNECTION_REQUEST_2 => OpenConnectionRequest2 =>
+        |src, expected_magic| decode_request_2(src, expected_magic).map(OfflinePacket::OpenConnectionRequest2),
+    ID_OPEN_CONNECTION_REPLY_2 => OpenConnectionReply2 =>
+        |src, expected_magic| decode_reply_2(src, expected_magic).map(OfflinePacket::OpenConnectionReply2),
+    ID_INCOMPATIBLE_PROTOCOL_VERSION => IncompatibleProtocolVersion =>
+        |src, expected_magic| decode_incompatible(src, expected_magic).map(OfflinePacket::IncompatibleProtocolVersion),
+    ID_CONNECTION_REQUEST_FAILED => ConnectionRequestFailed =>
+        |src, expected_magic| decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
+            OfflinePacket::ConnectionRequestFailed(ConnectionRequestFailed {
+                server_guid,
+                magic,
+            })
+        }),
+    ID_ALREADY_CONNECTED => AlreadyConnected =>
+        |src, expected_magic| decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
+            OfflinePacket::AlreadyConnected(AlreadyConnected { server_guid, magic })
+        }),
+    ID_NO_FREE_INCOMING_CONNECTIONS => NoFreeIncomingConnections =>
+        |src, expected_magic| decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
+            OfflinePacket::NoFreeIncomingConnections(NoFreeIncomingConnections {
+                server_guid,
+                magic,
+            })
+        }),
+    ID_CONNECTION_BANNED => ConnectionBanned =>
+        |src, expected_magic| decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
+            OfflinePacket::ConnectionBanned(ConnectionBanned { server_guid, magic })
+        }),
+    ID_IP_RECENTLY_CONNECTED => IpRecentlyConnected =>
+        |src, expected_magic| decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
+            OfflinePacket::IpRecentlyConnected(IpRecentlyConnected { server_guid, magic })
+        }),
+}
+
 impl OfflinePacket {
     pub fn id(&self) -> u8 {
-        match self {
-            OfflinePacket::UnconnectedPing(_) => ID_UNCONNECTED_PING,
-            OfflinePacket::UnconnectedPingOpenConnections(_) => {
-                ID_UNCONNECTED_PING_OPEN_CONNECTIONS
-            }
-            OfflinePacket::UnconnectedPong(_) => ID_UNCONNECTED_PONG,
-            OfflinePacket::OpenConnectionRequest1(_) => ID_OPEN_CONNECTION_REQUEST_1,
-            OfflinePacket::OpenConnectionReply1(_) => ID_OPEN_CONNECTION_REPLY_1,
-            OfflinePacket::OpenConnectionRequest2(_) => ID_OPEN_CONNECTION_REQUEST_2,
-            OfflinePacket::OpenConnectionReply2(_) => ID_OPEN_CONNECTION_REPLY_2,
-            OfflinePacket::IncompatibleProtocolVersion(_) => ID_INCOMPATIBLE_PROTOCOL_VERSION,
-            OfflinePacket::ConnectionRequestFailed(_) => ID_CONNECTION_REQUEST_FAILED,
-            OfflinePacket::AlreadyConnected(_) => ID_ALREADY_CONNECTED,
-            OfflinePacket::NoFreeIncomingConnections(_) => ID_NO_FREE_INCOMING_CONNECTIONS,
-            OfflinePacket::ConnectionBanned(_) => ID_CONNECTION_BANNED,
-            OfflinePacket::IpRecentlyConnected(_) => ID_IP_RECENTLY_CONNECTED,
-        }
+        offline_packet_id(self)
     }
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<(), EncodeError> {
@@ -247,63 +297,7 @@ impl OfflinePacket {
         expected_magic: Magic,
     ) -> Result<Self, DecodeError> {
         let id = u8::decode_raknet(src)?;
-        match id {
-            ID_UNCONNECTED_PING => {
-                decode_ping(src, expected_magic).map(OfflinePacket::UnconnectedPing)
-            }
-            ID_UNCONNECTED_PING_OPEN_CONNECTIONS => {
-                decode_ping(src, expected_magic).map(OfflinePacket::UnconnectedPingOpenConnections)
-            }
-            ID_UNCONNECTED_PONG => {
-                decode_pong(src, expected_magic).map(OfflinePacket::UnconnectedPong)
-            }
-            ID_OPEN_CONNECTION_REQUEST_1 => {
-                decode_request_1(src, expected_magic).map(OfflinePacket::OpenConnectionRequest1)
-            }
-            ID_OPEN_CONNECTION_REPLY_1 => {
-                decode_reply_1(src, expected_magic).map(OfflinePacket::OpenConnectionReply1)
-            }
-            ID_OPEN_CONNECTION_REQUEST_2 => {
-                decode_request_2(src, expected_magic).map(OfflinePacket::OpenConnectionRequest2)
-            }
-            ID_OPEN_CONNECTION_REPLY_2 => {
-                decode_reply_2(src, expected_magic).map(OfflinePacket::OpenConnectionReply2)
-            }
-            ID_INCOMPATIBLE_PROTOCOL_VERSION => decode_incompatible(src, expected_magic)
-                .map(OfflinePacket::IncompatibleProtocolVersion),
-            ID_CONNECTION_REQUEST_FAILED => {
-                decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
-                    OfflinePacket::ConnectionRequestFailed(ConnectionRequestFailed {
-                        server_guid,
-                        magic,
-                    })
-                })
-            }
-            ID_ALREADY_CONNECTED => {
-                decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
-                    OfflinePacket::AlreadyConnected(AlreadyConnected { server_guid, magic })
-                })
-            }
-            ID_NO_FREE_INCOMING_CONNECTIONS => {
-                decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
-                    OfflinePacket::NoFreeIncomingConnections(NoFreeIncomingConnections {
-                        server_guid,
-                        magic,
-                    })
-                })
-            }
-            ID_CONNECTION_BANNED => {
-                decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
-                    OfflinePacket::ConnectionBanned(ConnectionBanned { server_guid, magic })
-                })
-            }
-            ID_IP_RECENTLY_CONNECTED => {
-                decode_reject_packet(src, expected_magic).map(|(magic, server_guid)| {
-                    OfflinePacket::IpRecentlyConnected(IpRecentlyConnected { server_guid, magic })
-                })
-            }
-            _ => Err(DecodeError::InvalidOfflinePacketId(id)),
-        }
+        decode_offline_packet_with_registry(id, src, expected_magic)
     }
 }
 
