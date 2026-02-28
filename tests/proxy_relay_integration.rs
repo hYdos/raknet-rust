@@ -3,17 +3,17 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use mcbe_raknet_rs::client::{ClientSendOptions, RaknetClient, RaknetClientEvent};
-use mcbe_raknet_rs::protocol::reliability::Reliability;
-use mcbe_raknet_rs::proxy::{
+use raknet_rs::client::{ClientSendOptions, RaknetClient, RaknetClientEvent};
+use raknet_rs::protocol::reliability::Reliability;
+use raknet_rs::proxy::{
     PassthroughRelayPolicy, RaknetRelayProxy, RaknetRelayProxyEvent, RelayContract,
     RelayContractConfig, RelayDecision, RelayDirection, RelayDropReason, RelayOverflowPolicy,
     RelayPolicy, RelayRuntimeConfig, RelaySessionCloseReason, UpstreamConnector,
     UpstreamConnectorConfig,
 };
-use mcbe_raknet_rs::server::{PeerId, RaknetServer, RaknetServerEvent, SendOptions};
-use mcbe_raknet_rs::session::RakPriority;
-use mcbe_raknet_rs::transport::EventOverflowPolicy;
+use raknet_rs::server::{PeerId, RaknetServer, RaknetServerEvent, SendOptions};
+use raknet_rs::session::RakPriority;
+use raknet_rs::transport::EventOverflowPolicy;
 use tokio::time::timeout;
 
 fn allocate_loopback_bind_addr() -> SocketAddr {
@@ -234,7 +234,7 @@ async fn proxy_forwards_bidirectionally_between_downstream_and_upstream() -> io:
         wait_for_upstream_packet(&mut proxy, &mut upstream).await;
     assert_eq!(got_upstream_payload, down_payload);
 
-    let upstream_peer_id = mcbe_raknet_rs::server::PeerId::from_u64(upstream_peer_id_raw);
+    let upstream_peer_id = raknet_rs::server::PeerId::from_u64(upstream_peer_id_raw);
     let up_payload = Bytes::from_static(b"\xFEproxy-u2d");
     upstream.send(upstream_peer_id, up_payload.clone()).await?;
 

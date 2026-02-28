@@ -1,11 +1,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bytes::BytesMut;
-use mcbe_raknet_rs::handshake::OfflinePacket;
-use mcbe_raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
-use mcbe_raknet_rs::protocol::codec::RaknetCodec;
-use mcbe_raknet_rs::protocol::datagram::Datagram;
-use mcbe_raknet_rs::protocol::sequence24::Sequence24;
+use raknet_rs::handshake::OfflinePacket;
+use raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
+use raknet_rs::protocol::codec::RaknetCodec;
+use raknet_rs::protocol::datagram::Datagram;
+use raknet_rs::protocol::sequence24::Sequence24;
 use proptest::prelude::*;
 
 proptest! {

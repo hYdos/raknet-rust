@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use mcbe_raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
-use mcbe_raknet_rs::protocol::reliability::Reliability;
-use mcbe_raknet_rs::session::tunables::{CongestionProfile, SessionTunables};
-use mcbe_raknet_rs::session::{QueuePayloadResult, RakPriority, Session};
+use raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
+use raknet_rs::protocol::reliability::Reliability;
+use raknet_rs::session::tunables::{CongestionProfile, SessionTunables};
+use raknet_rs::session::{QueuePayloadResult, RakPriority, Session};
 
 fn default_tick(session: &mut Session, now: Instant, max_new_datagrams: usize) -> usize {
     session

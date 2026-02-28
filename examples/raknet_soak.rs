@@ -2,11 +2,11 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use mcbe_raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
-use mcbe_raknet_rs::protocol::datagram::DatagramPayload;
-use mcbe_raknet_rs::protocol::reliability::Reliability;
-use mcbe_raknet_rs::session::tunables::SessionTunables;
-use mcbe_raknet_rs::session::{QueuePayloadResult, RakPriority, Session};
+use raknet_rs::protocol::ack::{AckNackPayload, SequenceRange};
+use raknet_rs::protocol::datagram::DatagramPayload;
+use raknet_rs::protocol::reliability::Reliability;
+use raknet_rs::session::tunables::SessionTunables;
+use raknet_rs::session::{QueuePayloadResult, RakPriority, Session};
 
 fn parse_arg(args: &[String], key: &str, default: usize) -> usize {
     let prefix = format!("--{key}=");

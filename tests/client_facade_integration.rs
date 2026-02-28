@@ -3,13 +3,13 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use mcbe_raknet_rs::client::{
+use raknet_rs::client::{
     ClientDisconnectReason, ClientSendOptions, OfflineRejectionReason, RaknetClient,
     RaknetClientConfig, RaknetClientError, RaknetClientEvent, ReconnectPolicy,
 };
-use mcbe_raknet_rs::protocol::connected::{ConnectedControlPacket, DisconnectionNotification};
-use mcbe_raknet_rs::server::{PeerId, RaknetServer, RaknetServerEvent};
-use mcbe_raknet_rs::transport::EventOverflowPolicy;
+use raknet_rs::protocol::connected::{ConnectedControlPacket, DisconnectionNotification};
+use raknet_rs::server::{PeerId, RaknetServer, RaknetServerEvent};
+use raknet_rs::transport::EventOverflowPolicy;
 use tokio::time::timeout;
 
 fn allocate_loopback_bind_addr() -> SocketAddr {
