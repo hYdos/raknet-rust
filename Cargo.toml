@@ -2,8 +2,24 @@
 name = "raknet-rust"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "A high-performance RakNet transport library in Rust"
+authors = ["ClexaGod"]
+readme = "README.md"
+repository = "https://github.com/mcbe-rs/raknet-rust.git"
+homepage = "https://github.com/mcbe-rs/raknet-rust"
+documentation = "https://docs.rs/raknet-rust"
+keywords = ["raknet", "udp", "network", "tokio", "game-server"]
+categories = ["network-programming", "asynchronous", "game-development"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+    "src/**",
+    "examples/**",
+    "tests/**",
+]
 
 [dependencies]
 bitflags = "2.6"
