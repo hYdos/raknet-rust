@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use raknet_rust::client::{RaknetClient, RaknetClientEvent};
 use raknet_rust::server::{RaknetServer, ServerFacade};
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 
 fn allocate_loopback_bind_addr() -> SocketAddr {
     let socket = std::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -58,33 +58,26 @@ async fn pump_facade_until(
     timeout_budget: Duration,
     mut condition: impl FnMut() -> bool,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + timeout_budget;
-    while !condition() {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timed out waiting for facade condition",
-            ));
+    timeout(timeout_budget, async {
+        while !condition() {
+            let progressed = facade.next().await?;
+            if !progressed {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "server event stream closed",
+                ));
+            }
         }
 
-        let remaining = deadline.duration_since(now);
-        let step = remaining.min(Duration::from_millis(250));
-        let progressed = timeout(step, facade.next()).await.map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timed out waiting for facade event",
-            )
-        })??;
-        if !progressed {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "server event stream closed",
-            ));
-        }
-    }
-
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for facade condition",
+        )
+    })?
 }
 
 #[tokio::test(flavor = "current_thread")]
