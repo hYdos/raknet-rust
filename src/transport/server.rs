@@ -2485,8 +2485,18 @@ mod tests {
     use crate::session::{QueuePayloadResult, RakPriority, Session, SessionState};
     use crate::transport::config::{
         CookieMismatchGuardConfig, HandshakeHeuristicsConfig, ProcessingBudgetConfig,
-        Request2ServerAddrPolicy, TransportConfig, TransportSocketTuning,
+        Request2ServerAddrPolicy, TransportConfig,
     };
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    use crate::transport::config::TransportSocketTuning;
 
     fn build_test_server(mut config: TransportConfig) -> TransportServer {
         let rt = Builder::new_current_thread()

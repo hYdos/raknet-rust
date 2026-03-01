@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use raknet_rust::client::{ClientSendOptions, RaknetClient, RaknetClientEvent};
+use raknet_rust::client::{ClientSendOptions, RaknetClient, RaknetClientError, RaknetClientEvent};
 use raknet_rust::low_level::protocol::reliability::Reliability;
 use raknet_rust::low_level::session::RakPriority;
 use raknet_rust::low_level::transport::EventOverflowPolicy;
@@ -442,9 +442,23 @@ async fn proxy_policy_disconnect_closes_downstream_session() -> io::Result<()> {
     wait_for_client_connected(&mut client).await;
     let (session_peer_id, _, _) = wait_for_proxy_session_started(&mut proxy).await;
 
-    client
-        .send(Bytes::from_static(b"\xFEdisconnect-me"))
-        .await?;
+    let send_result = client.send(Bytes::from_static(b"\xFEdisconnect-me")).await;
+    if let Err(err) = send_result
+        && !matches!(err, RaknetClientError::Closed { .. })
+    {
+        let is_windows_forced_close = match &err {
+            RaknetClientError::Io { message } => {
+                let lower = message.to_ascii_lowercase();
+                lower.contains("forcibly closed")
+                    || lower.contains("connection reset")
+                    || lower.contains("10054")
+            }
+            _ => false,
+        };
+        if !is_windows_forced_close {
+            return Err(io::Error::other(err.to_string()));
+        }
+    }
 
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut saw_policy_disconnect = false;
