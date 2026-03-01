@@ -435,6 +435,9 @@ async fn run_worker_loop(
                         ).await?;
                     }
                     Err(e) => {
+                        if is_recoverable_udp_recv_error(&e) {
+                            continue;
+                        }
                         let _ = send_critical_event(&event_tx, ShardedRuntimeEvent::WorkerError {
                             shard_id,
                             message: format!("recv loop failed: {e}"),
@@ -445,6 +448,16 @@ async fn run_worker_loop(
             }
         }
     }
+}
+
+fn is_recoverable_udp_recv_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 fn apply_command(server: &mut TransportServer, command: ShardedRuntimeCommand) {

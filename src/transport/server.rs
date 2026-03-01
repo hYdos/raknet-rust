@@ -2483,10 +2483,6 @@ mod tests {
     use crate::protocol::sequence24::Sequence24;
     use crate::session::tunables::SessionTunables;
     use crate::session::{QueuePayloadResult, RakPriority, Session, SessionState};
-    use crate::transport::config::{
-        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, ProcessingBudgetConfig,
-        Request2ServerAddrPolicy, TransportConfig,
-    };
     #[cfg(any(
         target_os = "linux",
         target_os = "android",
@@ -2497,6 +2493,10 @@ mod tests {
         target_os = "openbsd"
     ))]
     use crate::transport::config::TransportSocketTuning;
+    use crate::transport::config::{
+        CookieMismatchGuardConfig, HandshakeHeuristicsConfig, ProcessingBudgetConfig,
+        Request2ServerAddrPolicy, TransportConfig,
+    };
 
     fn build_test_server(mut config: TransportConfig) -> TransportServer {
         let rt = Builder::new_current_thread()
