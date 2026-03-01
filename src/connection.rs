@@ -1,3 +1,8 @@
+//! Per-peer connection API returned by [`crate::listener::Listener`].
+//!
+//! [`Connection`] offers message-oriented send/recv methods.
+//! [`ConnectionIo`] adapts it to Tokio [`AsyncRead`] / [`AsyncWrite`].
+
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -17,13 +22,16 @@ use crate::concurrency::FastMutex;
 use crate::server::{PeerDisconnectReason, PeerId, SendOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Stable identifier for a [`Connection`].
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
+    /// Creates an id from raw `u64`.
     pub const fn from_u64(value: u64) -> Self {
         Self(value)
     }
 
+    /// Returns raw id value.
     pub const fn as_u64(self) -> u64 {
         self.0
     }
@@ -36,22 +44,26 @@ impl From<PeerId> for ConnectionId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Immutable connection identity snapshot.
 pub struct ConnectionMetadata {
     id: ConnectionId,
     remote_addr: SocketAddr,
 }
 
 impl ConnectionMetadata {
+    /// Returns connection id.
     pub const fn id(self) -> ConnectionId {
         self.id
     }
 
+    /// Returns remote peer socket address.
     pub const fn remote_addr(self) -> SocketAddr {
         self.remote_addr
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Remote-side reason mapped from RakNet disconnect semantics.
 pub enum RemoteDisconnectReason {
     Requested,
     RemoteDisconnectionNotification { reason_code: Option<u8> },
@@ -73,6 +85,7 @@ impl From<PeerDisconnectReason> for RemoteDisconnectReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Local close reason recorded by [`Connection`].
 pub enum ConnectionCloseReason {
     RequestedByLocal,
     PeerDisconnected(RemoteDisconnectReason),
@@ -82,6 +95,7 @@ pub enum ConnectionCloseReason {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// Receive-side errors from [`Connection::recv`] / [`Connection::recv_bytes`].
 pub enum RecvError {
     #[error("connection closed: {reason:?}")]
     ConnectionClosed { reason: ConnectionCloseReason },
@@ -95,6 +109,7 @@ pub mod queue {
     use thiserror::Error;
 
     #[derive(Debug, Error, Clone, PartialEq, Eq)]
+    /// Errors produced by connection send queue operations.
     pub enum SendQueueError {
         #[error("connection command channel closed")]
         CommandChannelClosed,
@@ -313,14 +328,17 @@ impl Connection {
         }
     }
 
+    /// Returns connection id.
     pub fn id(&self) -> ConnectionId {
         self.id
     }
 
+    /// Returns remote peer address.
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
     }
 
+    /// Returns immutable metadata snapshot.
     pub fn metadata(&self) -> ConnectionMetadata {
         ConnectionMetadata {
             id: self.id,
@@ -332,6 +350,7 @@ impl Connection {
         self.peer_id
     }
 
+    /// Returns close reason if connection is closed.
     pub fn close_reason(&self) -> Option<ConnectionCloseReason> {
         self.shared.close_reason()
     }
@@ -351,16 +370,19 @@ impl Connection {
         .await
     }
 
+    /// Sends bytes using default send options.
     pub async fn send_bytes(&self, payload: impl Into<Bytes>) -> Result<(), queue::SendQueueError> {
         self.send_with_options(payload, SendOptions::default())
             .await
     }
 
+    /// Sends borrowed bytes, copying into an owned payload buffer.
     pub async fn send(&self, payload: impl AsRef<[u8]>) -> Result<(), queue::SendQueueError> {
         self.send_bytes(Bytes::copy_from_slice(payload.as_ref()))
             .await
     }
 
+    /// Compatibility helper matching stream-like send signatures.
     pub async fn send_compat(
         &self,
         stream: &[u8],
@@ -369,6 +391,7 @@ impl Connection {
         self.send(stream).await
     }
 
+    /// Receives next payload as zero-copy [`Bytes`].
     pub async fn recv_bytes(&mut self) -> Result<Bytes, RecvError> {
         match self.inbound_rx.recv().await {
             Some(ConnectionInbound::Packet(payload)) => Ok(payload),
@@ -391,10 +414,12 @@ impl Connection {
         }
     }
 
+    /// Receives next payload as owned `Vec<u8>`.
     pub async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
         self.recv_bytes().await.map(|payload| payload.to_vec())
     }
 
+    /// Gracefully closes this connection.
     pub async fn close(&self) {
         if self.shared.is_closed() {
             return;
@@ -421,10 +446,12 @@ impl Connection {
         }
     }
 
+    /// Returns whether connection is currently closed.
     pub async fn is_closed(&self) -> bool {
         self.shared.is_closed()
     }
 
+    /// Converts into Tokio AsyncRead/AsyncWrite adapter.
     pub fn into_io(self) -> ConnectionIo {
         ConnectionIo::new(self)
     }
@@ -444,6 +471,7 @@ impl Drop for Connection {
     }
 }
 
+/// Tokio AsyncRead/AsyncWrite adapter over [`Connection`].
 pub struct ConnectionIo {
     connection: Connection,
     read_remainder: Option<Bytes>,
@@ -461,14 +489,17 @@ impl ConnectionIo {
         }
     }
 
+    /// Returns immutable underlying connection reference.
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
+    /// Returns mutable underlying connection reference.
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.connection
     }
 
+    /// Returns underlying connection and consumes adapter.
     pub fn into_inner(self) -> Connection {
         self.connection
     }

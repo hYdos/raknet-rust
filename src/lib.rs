@@ -1,3 +1,49 @@
+//! `raknet-rust` is an asynchronous RakNet transport library.
+//!
+//! The crate exposes two API layers:
+//! - High-level application API: [`server`], [`client`], [`listener`], [`connection`]
+//! - Low-level protocol/session/transport API: [`low_level`]
+//!
+//! # Quick Start (Server)
+//! ```rust,no_run
+//! use raknet_rust::server::{RaknetServer, RaknetServerEvent};
+//!
+//! #[tokio::main(flavor = "current_thread")]
+//! async fn main() -> std::io::Result<()> {
+//!     let mut server = RaknetServer::bind("0.0.0.0:19132".parse().unwrap()).await?;
+//!
+//!     while let Some(event) = server.next_event().await {
+//!         if let RaknetServerEvent::Packet { peer_id, payload, .. } = event {
+//!             server.send(peer_id, payload).await?;
+//!         }
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Quick Start (Client)
+//! ```rust,no_run
+//! use raknet_rust::client::{RaknetClient, RaknetClientEvent};
+//!
+//! #[tokio::main(flavor = "current_thread")]
+//! async fn main() -> std::io::Result<()> {
+//!     let mut client = RaknetClient::connect("127.0.0.1:19132".parse().unwrap()).await?;
+//!
+//!     while let Some(event) = client.next_event().await {
+//!         match event {
+//!             RaknetClientEvent::Connected { .. } => {
+//!                 client.send(&b"hello"[..]).await?;
+//!             }
+//!             RaknetClientEvent::Packet { .. } => break,
+//!             RaknetClientEvent::Disconnected { .. } => break,
+//!             _ => {}
+//!         }
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
 pub mod client;
 mod concurrency;
 pub mod connection;
@@ -12,7 +58,12 @@ mod session;
 pub mod telemetry;
 mod transport;
 
+/// Advanced low-level API surface.
+///
+/// This namespace exposes protocol/session/transport internals for users that need
+/// fine-grained control over wire behavior and runtime tuning.
 pub mod low_level {
+    /// Wire-level packet/datagram/frame primitives and codecs.
     pub mod protocol {
         pub use crate::protocol::{
             AckNackPayload, ConnectedControlPacket, Datagram, DatagramHeader, DatagramPayload,
@@ -22,6 +73,7 @@ pub mod low_level {
         };
     }
 
+    /// Session internals such as queue behavior and reliability tuning.
     pub mod session {
         pub use crate::session::tunables;
         pub use crate::session::{
@@ -30,6 +82,7 @@ pub mod low_level {
         };
     }
 
+    /// Transport runtime internals, shard runtime config, and routing policies.
     pub mod transport {
         pub use crate::transport::{
             ConnectedFrameDelivery, EventOverflowPolicy, HandshakeHeuristicsConfig,

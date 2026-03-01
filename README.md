@@ -15,9 +15,17 @@ usable as a general RakNet library.
 
 ### Installation
 
+With `cargo add`:
+
+```bash
+cargo add raknet-rust
+```
+
+Or edit `Cargo.toml` directly:
+
 ```toml
 [dependencies]
-raknet-rust = { path = "../raknet-rust" }
+raknet-rust = "0.2.0"
 ```
 
 ## API Surface

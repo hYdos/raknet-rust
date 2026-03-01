@@ -1,3 +1,7 @@
+//! Listener-oriented API built on top of [`crate::server::RaknetServer`].
+//!
+//! [`Listener`] accepts inbound peers and exposes them as [`Connection`] objects.
+
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -32,10 +36,12 @@ struct PeerRuntime {
     shared: Arc<ConnectionSharedState>,
 }
 
+/// Stream-like helper for sequentially accepting [`Connection`] values.
 pub struct Incoming<'a> {
     accept_rx: &'a mut mpsc::Receiver<Connection>,
 }
 
+/// High-level listener that accepts inbound RakNet peers as [`Connection`] objects.
 pub struct Listener {
     bind_addr: SocketAddr,
     transport_config: TransportConfig,
@@ -47,6 +53,7 @@ pub struct Listener {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Runtime metadata snapshot for [`Listener`].
 pub struct ListenerMetadata {
     bind_addr: SocketAddr,
     started: bool,
@@ -55,24 +62,29 @@ pub struct ListenerMetadata {
 }
 
 impl ListenerMetadata {
+    /// Returns bound address.
     pub const fn bind_addr(&self) -> SocketAddr {
         self.bind_addr
     }
 
+    /// Returns whether listener runtime is currently started.
     pub const fn started(&self) -> bool {
         self.started
     }
 
+    /// Returns configured shard count.
     pub const fn shard_count(&self) -> usize {
         self.shard_count
     }
 
+    /// Returns current pong advertisement string.
     pub fn advertisement(&self) -> &str {
         &self.advertisement
     }
 }
 
 impl Listener {
+    /// Creates a listener bound to `bind_addr` with default configs.
     pub async fn bind(bind_addr: SocketAddr) -> Result<Self, ServerError> {
         let transport_config = TransportConfig {
             bind_addr,
@@ -90,34 +102,42 @@ impl Listener {
         })
     }
 
+    /// Sets pong/advertisement payload returned during offline ping.
     pub fn set_pong_data(&mut self, data: impl Into<String>) {
         self.transport_config.advertisement = data.into();
     }
 
+    /// Returns pong/advertisement payload.
     pub fn pong_data(&self) -> &str {
         &self.transport_config.advertisement
     }
 
+    /// Sets incoming connection queue capacity.
     pub fn set_accept_queue_capacity(&mut self, capacity: usize) {
         self.accept_queue_capacity = capacity.max(1);
     }
 
+    /// Sets per-connection inbound packet queue capacity.
     pub fn set_inbound_queue_capacity(&mut self, capacity: usize) {
         self.inbound_queue_capacity = capacity.max(1);
     }
 
+    /// Sets command channel capacity used by accepted [`Connection`]s.
     pub fn set_command_queue_capacity(&mut self, capacity: usize) {
         self.command_queue_capacity = capacity.max(1);
     }
 
+    /// Sets shard count (minimum `1`).
     pub fn set_shard_count(&mut self, shard_count: usize) {
         self.runtime_config.shard_count = shard_count.max(1);
     }
 
+    /// Returns configured bind address.
     pub fn bind_addr(&self) -> SocketAddr {
         self.bind_addr
     }
 
+    /// Returns listener metadata snapshot.
     pub fn metadata(&self) -> ListenerMetadata {
         ListenerMetadata {
             bind_addr: self.bind_addr,
@@ -127,10 +147,12 @@ impl Listener {
         }
     }
 
+    /// Returns `true` if runtime is started.
     pub fn is_started(&self) -> bool {
         self.runtime.is_some()
     }
 
+    /// Starts listener runtime.
     pub async fn start(&mut self) -> Result<(), ServerError> {
         if self.runtime.is_some() {
             return Err(ServerError::AlreadyStarted);
@@ -172,6 +194,7 @@ impl Listener {
         Ok(())
     }
 
+    /// Stops listener runtime and disconnects active peers.
     pub async fn stop(&mut self) -> Result<(), ServerError> {
         let Some(runtime) = self.runtime.take() else {
             return Ok(());
@@ -195,6 +218,7 @@ impl Listener {
         response.map_err(ServerError::from)
     }
 
+    /// Accepts next inbound connection.
     pub async fn accept(&mut self) -> Result<Connection, ServerError> {
         self.accept_receiver()?
             .recv()
@@ -202,6 +226,7 @@ impl Listener {
             .ok_or(ServerError::AcceptChannelClosed)
     }
 
+    /// Returns `Incoming` helper for stream-style accept loop.
     pub fn incoming(&mut self) -> Result<Incoming<'_>, ServerError> {
         let accept_rx = self.accept_receiver()?;
         Ok(Incoming { accept_rx })
@@ -214,6 +239,7 @@ impl Listener {
 }
 
 impl Incoming<'_> {
+    /// Waits for the next accepted connection.
     pub async fn next(&mut self) -> Option<Connection> {
         self.accept_rx.recv().await
     }

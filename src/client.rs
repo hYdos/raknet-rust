@@ -1,3 +1,8 @@
+//! High-level client API.
+//!
+//! [`RaknetClient`] manages handshake, reliability, keepalive, and event polling
+//! for a single outbound connection to a RakNet server.
+
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -33,9 +38,13 @@ use crate::session::{
 pub type ClientResult<T> = Result<T, RaknetClientError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Send policy used by [`RaknetClient::send_with_options`].
 pub struct ClientSendOptions {
+    /// RakNet reliability class for outgoing payload.
     pub reliability: Reliability,
+    /// Ordering channel for ordered/sequenced reliabilities.
     pub channel: u8,
+    /// Session scheduling priority.
     pub priority: RakPriority,
 }
 
@@ -50,6 +59,7 @@ impl Default for ClientSendOptions {
 }
 
 #[derive(Debug, Clone)]
+/// Configuration for [`RaknetClient`].
 pub struct RaknetClientConfig {
     pub local_addr: Option<SocketAddr>,
     pub guid: u64,
@@ -101,6 +111,7 @@ impl Default for RaknetClientConfig {
 }
 
 impl RaknetClientConfig {
+    /// Validates configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         if !(MINIMUM_MTU_SIZE..=MAXIMUM_MTU_SIZE).contains(&self.mtu) {
             return Err(ConfigValidationError::new(
@@ -238,6 +249,7 @@ impl RaknetClientConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Last handshake stage reached before timeout.
 pub enum HandshakeStage {
     OpenConnectionRequest1,
     OpenConnectionRequest2,
@@ -245,6 +257,7 @@ pub enum HandshakeStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Explicit offline handshake rejection reasons.
 pub enum OfflineRejectionReason {
     IncompatibleProtocolVersion {
         protocol_version: u8,
@@ -268,6 +281,7 @@ pub enum OfflineRejectionReason {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// Errors returned by client connect/send/receive operations.
 pub enum RaknetClientError {
     #[error("transport io error: {message}")]
     Io { message: String },
@@ -304,6 +318,7 @@ impl From<RaknetClientError> for io::Error {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Reason for client-side disconnection.
 pub enum ClientDisconnectReason {
     Requested,
     Backpressure,
@@ -314,6 +329,7 @@ pub enum ClientDisconnectReason {
 }
 
 #[derive(Debug)]
+/// Event stream produced by [`RaknetClient::next_event`].
 pub enum RaknetClientEvent {
     Connected {
         server_addr: SocketAddr,
@@ -339,6 +355,7 @@ pub enum RaknetClientEvent {
 }
 
 #[derive(Debug, Clone)]
+/// Retry policy for [`RaknetClient::connect_with_retry`].
 pub struct ReconnectPolicy {
     pub max_attempts: usize,
     pub initial_backoff: Duration,
@@ -362,6 +379,7 @@ impl Default for ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
+    /// Validates retry policy invariants.
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         if self.max_attempts == 0 {
             return Err(ConfigValidationError::new(
@@ -385,6 +403,7 @@ impl ReconnectPolicy {
     }
 }
 
+/// Single-session high-level RakNet client.
 pub struct RaknetClient {
     socket: UdpSocket,
     server_addr: SocketAddr,
@@ -398,10 +417,12 @@ pub struct RaknetClient {
 }
 
 impl RaknetClient {
+    /// Connects with default [`RaknetClientConfig`].
     pub async fn connect(server_addr: SocketAddr) -> ClientResult<Self> {
         Self::connect_with_config(server_addr, RaknetClientConfig::default()).await
     }
 
+    /// Connects with retry policy.
     pub async fn connect_with_retry(
         server_addr: SocketAddr,
         config: RaknetClientConfig,
@@ -445,6 +466,7 @@ impl RaknetClient {
         )
     }
 
+    /// Connects using explicit client configuration.
     pub async fn connect_with_config(
         server_addr: SocketAddr,
         config: RaknetClientConfig,
@@ -492,23 +514,28 @@ impl RaknetClient {
         Ok(client)
     }
 
+    /// Returns local socket address used by this client.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
+    /// Returns remote server address.
     pub fn server_addr(&self) -> SocketAddr {
         self.server_addr
     }
 
+    /// Returns session-level metrics snapshot.
     pub fn metrics_snapshot(&self) -> SessionMetricsSnapshot {
         self.session.metrics_snapshot()
     }
 
+    /// Sends payload with default send options.
     pub async fn send(&mut self, payload: impl Into<Bytes>) -> ClientResult<()> {
         self.send_with_options(payload, ClientSendOptions::default())
             .await
     }
 
+    /// Sends payload with explicit options.
     pub async fn send_with_options(
         &mut self,
         payload: impl Into<Bytes>,
@@ -531,6 +558,7 @@ impl RaknetClient {
         .await
     }
 
+    /// Sends payload and tracks a receipt id.
     pub async fn send_with_receipt(
         &mut self,
         payload: impl Into<Bytes>,
@@ -554,6 +582,7 @@ impl RaknetClient {
         .await
     }
 
+    /// Gracefully disconnects client.
     pub async fn disconnect(&mut self, reason_code: Option<u8>) -> ClientResult<()> {
         if self.closed {
             return Ok(());
@@ -585,6 +614,9 @@ impl RaknetClient {
         queued
     }
 
+    /// Polls next client event.
+    ///
+    /// Returns `None` once client is fully closed and pending events are drained.
     pub async fn next_event(&mut self) -> Option<RaknetClientEvent> {
         if let Some(event) = self.pending_events.pop_front() {
             return Some(event);
