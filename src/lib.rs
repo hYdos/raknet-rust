@@ -75,6 +75,7 @@ pub mod low_level {
 
     /// Session internals such as queue behavior and reliability tuning.
     pub mod session {
+        pub use crate::session::split_assembler;
         pub use crate::session::tunables;
         pub use crate::session::{
             QueuePayloadResult, RakPriority, ReceiptProgress, Session, SessionMetricsSnapshot,

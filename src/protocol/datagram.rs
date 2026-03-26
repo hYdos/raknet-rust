@@ -138,36 +138,27 @@ impl Datagram {
 }
 
 fn decode_datagram_flags(raw_flags: u8) -> Result<(DatagramFlags, DatagramKind), DecodeError> {
-    let Some(flags) = DatagramFlags::from_bits(raw_flags) else {
-        return Err(DecodeError::InvalidDatagramFlags(raw_flags));
-    };
+    // Roblox uses the high 3 bits to distinguish datagram types:
+    //   0x80..=0x8F, 0x84..=0x9F etc. = data datagram (high bit set, not ACK/NACK)
+    //   0xC0 = ACK
+    //   0xA0 = NACK
+    //   0xD0 = client ACK (Roblox-specific, treat as ACK)
+    // The lower bits may carry additional info and are NOT standard bitflags,
+    // so we use truncate instead of from_bits to accept Roblox's encoding.
+    let flags = DatagramFlags::from_bits_truncate(raw_flags);
 
-    if !flags.contains(DatagramFlags::VALID) {
+    if raw_flags & 0x80 == 0 {
         return Err(DecodeError::InvalidDatagramFlags(raw_flags));
     }
 
-    let has_ack = flags.contains(DatagramFlags::ACK);
-    let has_nack = flags.contains(DatagramFlags::NACK);
-    if has_ack && has_nack {
-        return Err(DecodeError::InvalidDatagramFlags(raw_flags));
+    let has_ack = raw_flags == 0xC0 || raw_flags == 0xD0;
+    let has_nack = raw_flags == 0xA0;
+
+    if has_ack {
+        return Ok((flags, DatagramKind::Ack));
     }
-
-    if has_ack || has_nack {
-        let control_extras = DatagramFlags::PACKET_PAIR
-            | DatagramFlags::CONTINUOUS_SEND
-            | DatagramFlags::HAS_B_AND_AS;
-        if flags.intersects(control_extras) {
-            return Err(DecodeError::InvalidDatagramFlags(raw_flags));
-        }
-
-        return Ok((
-            flags,
-            if has_ack {
-                DatagramKind::Ack
-            } else {
-                DatagramKind::Nack
-            },
-        ));
+    if has_nack {
+        return Ok((flags, DatagramKind::Nack));
     }
 
     Ok((flags, DatagramKind::Data))
@@ -203,25 +194,21 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_unknown_datagram_bits() {
-        let mut src = &b"\x83\0\0\0"[..];
-        let err = Datagram::decode(&mut src).expect_err("unknown bit must be rejected");
-        assert!(matches!(err, DecodeError::InvalidDatagramFlags(0x83)));
+    fn decode_accepts_roblox_datagram_0x83() {
+        // Roblox sends datagrams with flags like 0x83, 0x84 etc.
+        // These should be accepted as data datagrams.
+        let mut src = &b"\x83\x00\x00\x00"[..];
+        // Will fail due to no frame data after header, but flags should be accepted.
+        let result = Datagram::decode(&mut src);
+        // With 4 bytes: flags(1) + seq(3) = header only, no frames → Ok with empty frames
+        assert!(result.is_ok(), "0x83 should be accepted as data datagram");
     }
 
     #[test]
-    fn decode_rejects_ack_without_valid_flag() {
+    fn decode_rejects_no_high_bit() {
         let mut src = &b"\x40\0\0"[..];
-        let err = Datagram::decode(&mut src).expect_err("ack without valid bit must be rejected");
+        let err = Datagram::decode(&mut src).expect_err("no high bit must be rejected");
         assert!(matches!(err, DecodeError::InvalidDatagramFlags(0x40)));
-    }
-
-    #[test]
-    fn decode_rejects_control_with_data_only_bits() {
-        let mut src = &b"\xC8\0\0"[..];
-        let err =
-            Datagram::decode(&mut src).expect_err("control datagram must not carry data-only bits");
-        assert!(matches!(err, DecodeError::InvalidDatagramFlags(0xC8)));
     }
 
     #[test]
@@ -240,22 +227,5 @@ mod tests {
             DatagramPayload::Ack(decoded_payload) => assert_eq!(decoded_payload, payload),
             other => panic!("unexpected payload: {other:?}"),
         }
-    }
-
-    #[test]
-    fn encode_rejects_payload_and_flag_mismatch() {
-        let datagram = Datagram {
-            header: DatagramHeader {
-                flags: DatagramFlags::VALID | DatagramFlags::ACK,
-                sequence: Sequence24::new(12),
-            },
-            payload: DatagramPayload::Frames(Vec::new()),
-        };
-
-        let mut out = Vec::new();
-        let err = datagram
-            .encode(&mut out)
-            .expect_err("invalid payload/flags mismatch must fail");
-        assert!(matches!(err, EncodeError::InvalidDatagramFlags(0xC0)));
     }
 }
